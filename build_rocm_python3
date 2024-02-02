@@ -61,18 +61,20 @@ else
     RESOURCE_OPTION=""
 fi
 
+pip3 uninstall -y tensorflow tensorflow_rocm tf_nightly_rocm
+
 if [ -f /usertools/rocm.bazelrc ]; then
 	# Use the bazelrc files in /usertools if available
 	if [[ -n $nightly ]]; then
 		python3 tensorflow/tools/ci_build/update_version.py --nightly --rocm_version &&
 		bazel --bazelrc=/usertools/rocm.bazelrc build $RESOURCE_OPTION --config=rocm --action_env=TF_PYTHON_VERSION=$PYTHON_VERSION tensorflow/tools/pip_package:build_pip_package --verbose_failures &&
 		./bazel-bin/tensorflow/tools/pip_package/build_pip_package /tf/pkg --rocm --nightly_flag &&
-		pip3 install --upgrade $TF_PKG_LOC/tf_nightly_rocm*.whl
+		pip3 install --upgrade /tf/pkg/tf_nightly_rocm*.whl
 	else
 		python3 tensorflow/tools/ci_build/update_version.py --rocm_version &&
 		bazel --bazelrc=/usertools/rocm.bazelrc build $RESOURCE_OPTION --config=rocm --action_env=TF_PYTHON_VERSION=$PYTHON_VERSION tensorflow/tools/pip_package:build_pip_package --verbose_failures &&
 		./bazel-bin/tensorflow/tools/pip_package/build_pip_package /tf/pkg --rocm --project_name tensorflow_rocm &&
-		pip3 install --upgrade $TF_PKG_LOC/tensorflow*.whl
+		pip3 install --upgrade /tf/pkg/tensorflow*.whl
 	fi
 else
 	# Legacy style: run configure then build

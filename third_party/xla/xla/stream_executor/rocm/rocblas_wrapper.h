@@ -20,7 +20,9 @@ limitations under the License.
 #ifndef XLA_STREAM_EXECUTOR_ROCM_ROCBLAS_WRAPPER_H_
 #define XLA_STREAM_EXECUTOR_ROCM_ROCBLAS_WRAPPER_H_
 
+#define ROCBLAS_BETA_FEATURES_API
 #include "rocm/include/rocblas/rocblas.h"
+#include "rocm/include/rocblas/internal/rocblas-beta.h"
 #include "xla/stream_executor/gpu/gpu_activation.h"
 #include "xla/stream_executor/platform/dso_loader.h"
 #include "xla/stream_executor/platform/port.h"
@@ -270,6 +272,10 @@ using stream_executor::internal::CachedDsoLoader::GetRocblasDsoHandle;
 // clang-format on
 
 FOREACH_ROCBLAS_API(ROCBLAS_API_WRAPPER)
+
+#if ROCBLAS_VERSION_MAJOR>3 || (ROCBLAS_VERSION_MAJOR==3 && ROCBLAS_VERSION_MINOR>=1)
+ROCBLAS_API_WRAPPER(rocblas_gemm_ex3)
+#endif
 
 }  // namespace wrap
 }  // namespace stream_executor

@@ -42,10 +42,109 @@ limitations under the License.
 #include "xla/stream_executor/stream_executor.h"
 #include "tsl/platform/logging.h"
 #include "tsl/util/determinism.h"
+#include "tsl/util/env_var.h"
 using tsl::OpDeterminismRequired;
 
 namespace stream_executor {
 namespace gpu {
+
+//PLUGIN_REGISTRY_DEFINE_PLUGIN_ID(kRocBlasPlugin);
+
+void rocm_castHalf2F8(void* stream, uint8_t* dst, const __half* src, int size, int fp8);
+void rocm_castF82Half(void* stream, __half* dst, const uint8_t* src, int size, int fp8);
+
+std::map<std::string, uint64_t> flop_lookup;
+std::map<std::string, std::vector<double> > timing_database;
+int timing_database_call_count = 0;
+double total_time = 0, last_total_time = 0;
+std::mutex timing_mutex;
+
+template <typename T>
+float stdev(const std::vector<T>& v)
+{
+  float mean = 0, s = 0;
+  for(int i=0; i<v.size(); i++)
+    mean += float(v[i]);
+  mean /= v.size();
+  for(int i=0; i<v.size(); i++)
+    s += (float(v[i])-mean)*(float(v[i])-mean);
+  return sqrt(s/v.size());
+}
+
+template <typename T>
+T filtered_mean(std::vector<T> v, int& excluded)
+{
+  if(v.size()==1)
+  {
+    excluded=0;
+    return v[0];
+  }
+  std::sort(v.begin(), v.end());
+  T mean = 0, stdev = 0;
+  for(int i=(v.size()>2 ? 1 : 0); i<int(v.size()>2 ? v.size()-1 : v.size()); i++)
+    mean += v[i];
+  mean /= T(v.size() - (v.size()>2 ? 2 : 0));
+  T mean2 = 0;
+  if(v.size() > 3) 
+  {
+    for(int i=(v.size()>2 ? 1 : 0); i<int(v.size()>2 ? v.size()-1 : v.size()); i++)
+      stdev += (v[i]-mean)*(v[i]-mean);
+    stdev = sqrt(stdev/T(v.size() - (v.size()>2 ? 2 : 0)));
+
+    int mean_count = 0;
+    for(auto x: v)
+      if(x>mean-5*stdev && x<mean+5*stdev)
+      {
+        mean2+=x;
+        mean_count++;
+      }
+    mean2 /= mean_count;
+    excluded = v.size() - mean_count;
+  }
+  else
+  {
+    mean2 = mean;
+    excluded = 0;
+  }
+  return mean2;
+}
+
+void update_db(std::string key, uint64_t flops, double ms)
+{
+  int64_t do_stats = 0;
+  tsl::Status status = tsl::ReadInt64FromEnvVar("GEMM_STATS", 0, &do_stats);
+  if(do_stats == 0)
+    return;
+
+  timing_mutex.lock();
+  total_time += ms;
+  if(timing_database.find(key) == timing_database.end())
+  {
+    timing_database[key] = std::vector<double>{ms};
+    flop_lookup[key] = flops;
+  }
+  else
+    timing_database[key].push_back(ms);
+  timing_database_call_count++;
+  if(total_time > last_total_time+10000.0 || !(timing_database_call_count % 10000))
+  {
+    fflush(stdout);
+    //double total_time = 0;
+    for(auto k: timing_database)
+    {
+      double mean;
+      int excluded;
+      mean = filtered_mean(k.second, excluded);
+      //total_time += mean * k.second.size();
+      printf("%s   %.3f ms/call, %d calls (%d excluded), %.1f TFlops\n", 
+        k.first.c_str(), mean, k.second.size(), excluded, double(flop_lookup[k.first])/(mean*1e9));
+    }
+    printf("%.3f s total recorded time\n", total_time/1e3);
+    last_total_time = total_time;
+    fflush(stdout);
+  }
+  timing_mutex.unlock(); 
+}
 
 extern void rocm_Broadcast_fp32(void *stream, float *dst, int dst_stride,
                                 int batches, int src_batches, float *src,
@@ -125,6 +224,9 @@ bool ROCMBlas::Init() {
         (gcnArchName == "90a") || (gcnArchName == "940") ||
         (gcnArchName == "941") || (gcnArchName == "942"))
       has_mfma_ = true;
+    if ((gcnArchName == "940") ||
+        (gcnArchName == "941") || (gcnArchName == "942"))
+      has_f8_ = true;
     if(gcnArchName == "90a")
       use_hgemm_alt_impl_ = true;
   }
@@ -439,6 +541,70 @@ bool ROCMBlas::DoBlasSbmv(Stream *stream, blas::UpperLower uplo, uint64_t n,
       incx, &beta, GpuMemoryMutable(y), incy);
 }
 
+static void maybe_start_timer(std::optional<GpuTimer>& timer, Stream *stream)
+{
+  int64_t do_stats = 0;
+  tsl::Status status = tsl::ReadInt64FromEnvVar("GEMM_STATS", 0, &do_stats);
+  if(do_stats) {
+    hipStreamCaptureStatus captureStatus;
+    hipError_t err = hipStreamIsCapturing(AsGpuStreamValue(stream), &captureStatus);
+    if(err == hipSuccess && captureStatus == hipStreamCaptureStatusNone) {
+      auto timer_or_status = gpu::GpuTimer::Create(AsGpuStream(stream));
+      if (!timer_or_status.ok()) {
+        LOG(ERROR) << "Failed to create timer";
+        return;
+      }
+      timer.emplace(std::move(*timer_or_status));
+    }
+  }
+}
+
+static void maybe_stop_timer(std::optional<GpuTimer>& timer, 
+              std::string report_string, uint64_t flops)
+{
+    // At time intervals we're working with (often <200 microseconds), synchronization
+    // can have observable negative impact on overall timing.
+    if(timer) {
+      tsl::StatusOr<absl::Duration> elapsed = timer->GetElapsedDuration();
+      if(elapsed.ok()) {
+        double t = absl::ToDoubleMilliseconds(*elapsed);
+        update_db(report_string, flops, t);
+      }
+    }
+}
+
+int fetch(std::vector<Eigen::half>& v, const Eigen::half* p, int n, hipStream_t stream)
+{
+  v.resize(n);
+  hipMemcpyAsync(&v[0], p, n*2, hipMemcpyDeviceToHost, stream);
+  hipStreamSynchronize(stream);
+  int ninf=0;
+  for(int i=0; i<n; i++)
+    if(!isfinite(float(v[i])))
+      ninf++;
+  return ninf;
+}
+
+void eval_differences(const std::vector<Eigen::half>& va, const std::vector<Eigen::half>& vb, double& mean, double& maxval)
+{
+  double sum=0;
+  maxval=0;
+  int count=0;
+  for(int i=0; i<va.size(); i++)
+  {
+    if(!isfinite(float(va[i])) || !isfinite(float(vb[i])))
+      continue;
+    count++;
+    double d = fabs(float(va[i])-float(vb[i]));
+    sum+=d;
+    maxval=std::max(maxval,d);
+  }
+  if(count==0)
+    count=1;
+  mean = sum/count;
+}
+
+
 tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
                                  blas::Transpose transb, uint64_t m, uint64 n,
                                  uint64_t k, blas::DataType dtype,
@@ -482,8 +648,227 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
     exit(-1);
   }
 
+  tsl::Status status;
+  std::optional<gpu::GpuTimer> timer;
+  std::string prefix;
+  if(dtype==blas::DataType::kHalf)
+    prefix="F16";
+  else if(dtype==blas::DataType::kBF16)
+    prefix="BF16";
+  else if(dtype==blas::DataType::kFloat)
+    prefix="F32";
+  std::string report_string = " matmul M " + std::to_string(m)
+    + " N " + std::to_string(n) + " K " + std::to_string(k) + " "
+    + ((transa == blas::Transpose::kNoTranspose) ? "N" : "T")
+    + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T");
+
+  int64_t gemm_numerics = 0;
+  status = tsl::ReadInt64FromEnvVar("GEMM_NUMERICS", 0, &gemm_numerics);
+
+#if ROCBLAS_VERSION_MAJOR>3 || (ROCBLAS_VERSION_MAJOR==3 && ROCBLAS_VERSION_MINOR>=1)
+  if(dtype==blas::DataType::kHalf) {
+    if(!(numeric_options.grad_flags & 256) ) {
+      printf("DoBlasGemm: no F8 flags!\n");
+      exit(0);
+    }
+
+    std::vector<Eigen::half> va, vb, vc, vc8;
+
+    bool f8_on = !(numeric_options.grad_flags & 4);
+    int64_t f8_env = 0, f8_mm_env = 0, f8_emu = 0;
+    tsl::Status status = tsl::ReadInt64FromEnvVar("TF_ROCM_F8", 0, &f8_env);
+    status = tsl::ReadInt64FromEnvVar("F8_MM", 0, &f8_mm_env);
+    status = tsl::ReadInt64FromEnvVar("F8_EMU", 0, &f8_emu);
+    if(f8_env == 0 || (f8_mm_env & 1) == 0)
+      f8_on = false;
+    if((numeric_options.grad_flags & 4)==4)
+      f8_on = false;
+    if(f8_on && !has_f8_)
+      f8_emu = true;
+    //printf("numeric_flags %d, f8_env %d, f8_mm_env %d, f8_emu %d\n",
+    //  numeric_options.grad_flags, (int)f8_env, (int)f8_mm_env, (int)f8_emu);
+    if(f8_on) {
+      auto hipError = hipStreamSynchronize(AsGpuStreamValue(stream));
+      //const auto start = std::chrono::high_resolution_clock::now();
+      report_string += " f8_flags " + std::to_string(numeric_options.grad_flags);
+      if(f8_emu)
+        report_string += " emulated ";
+
+      rocblas_computetype compute_type;
+      switch (numeric_options.grad_flags & 3) {
+        case 0:
+          compute_type = rocblas_compute_type_f8_f8_f32;
+          break;
+        case 1:
+          compute_type = rocblas_compute_type_bf8_f8_f32;
+          break;
+        case 2:
+          compute_type = rocblas_compute_type_f8_bf8_f32;
+          break;
+        case 3:
+          return tsl::errors::Internal(absl::StrCat("Unexpected grad_flags for GEMM: ",
+                                            numeric_options.grad_flags & 3));
+      }
+      report_string = "F8" + report_string + " " + std::to_string(numeric_options.grad_flags & 3);
+
+//#define CHECK_NUMERICS
+
+      // alpha and beta point at floats, and rocblas_gemm_ex3 expects floats
+      const Eigen::half alpha_half(*static_cast<const float *>(alpha));
+      const Eigen::half beta_half(*static_cast<const float *>(beta));
+      //int cinf16=0;
+      if(gemm_numerics)
+      {
+        status = DoBlasInternalStatus(
+            wrap::rocblas_gemm_ex, stream, /* pointer_mode_host = */ true,
+            ROCMBlasTranspose(transa), ROCMBlasTranspose(transb),
+            (rocblas_int)m, (rocblas_int)n, (rocblas_int)k, alpha, a.opaque(),
+            rocblas_datatype_f16_r, lda, b.opaque(), rocblas_datatype_f16_r,
+            ldb, beta, c->opaque(), rocblas_datatype_f16_r, ldc, c->opaque(),
+            rocblas_datatype_f16_r, ldc, rocblas_datatype_f32_r,
+            rocblas_gemm_algo_standard, 0, 0);
+      }
+
+      uint8_t *temp_a, *temp_b;
+
+      std::unique_ptr<TemporaryDeviceMemory<uint8_t> > temp_mem;
+      DeviceMemory<uint8_t> device_memory;
+      TF_ASSIGN_OR_RETURN(temp_mem, 
+        stream->AllocateTemporaryArray<uint8_t>(m*k+n*k));
+      device_memory = DeviceMemory<uint8_t>(*(temp_mem->mutable_device_memory()));
+
+      temp_a = (uint8_t*)device_memory.opaque();
+      temp_b = temp_a+m*k;
+      bool a_fp8 = (numeric_options.grad_flags & 3) != 1;
+      bool b_fp8 = (numeric_options.grad_flags & 3) != 2;
+
+      rocm_castHalf2F8(AsGpuStreamValue(stream), temp_a, (const __half*)a.opaque(), m*k, a_fp8 ? 1 : 0);
+      rocm_castHalf2F8(AsGpuStreamValue(stream), temp_b, (const __half*)b.opaque(), n*k, b_fp8 ? 1 : 0);
+      //hipStreamSynchronize(AsGpuStreamValue(stream));
+
+      maybe_start_timer(timer, stream);
+      tsl::Status retval;
+      if(f8_emu) {
+        rocm_castF82Half(AsGpuStreamValue(stream), (__half*)a.opaque(), temp_a, m*k, a_fp8 ? 1 : 0);
+        rocm_castF82Half(AsGpuStreamValue(stream), (__half*)b.opaque(), temp_b, n*k, b_fp8 ? 1 : 0);
+        retval = DoBlasInternalStatus(
+              wrap::rocblas_gemm_ex, stream, /*ignored*/ true,
+              ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), 
+              (rocblas_int)m, (rocblas_int)n, (rocblas_int)k, 
+              alpha, a.opaque(), rocblas_datatype_f16_r, lda,
+              b.opaque(), rocblas_datatype_f16_r, ldb,
+              beta, 
+              c->opaque(), rocblas_datatype_f16_r, ldc,
+              c->opaque(), rocblas_datatype_f16_r, ldc,
+              rocblas_datatype_f32_r,
+              rocblas_gemm_algo_standard, 0, 0);
+      }
+      else {
+        retval = DoBlasInternalStatus(
+              wrap::rocblas_gemm_ex3, stream, /*ignored*/ true,
+              ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), 
+              (rocblas_int)m, (rocblas_int)n, (rocblas_int)k, 
+              alpha, temp_a, a_fp8 ? rocblas_datatype_f8_r : rocblas_datatype_bf8_r, lda,
+              temp_b, b_fp8 ? rocblas_datatype_f8_r : rocblas_datatype_bf8_r, ldb,
+              beta, 
+              c->opaque(), rocblas_datatype_f16_r, ldc,
+              c->opaque(), rocblas_datatype_f16_r, ldc,
+              rocblas_compute_type_f32,
+              rocblas_gemm_algo_standard, 0, 0);
+      }
+
+      if(gemm_numerics)
+      {
+        hipStreamSynchronize(AsGpuStreamValue(stream));
+        int ainf = fetch(va, (const Eigen::half*)a.opaque(), m*k, AsGpuStreamValue(stream));
+        int binf = fetch(vb, (const Eigen::half*)b.opaque(), n*k, AsGpuStreamValue(stream));
+        int cinf8 = fetch(vc8, (const Eigen::half*)c->opaque(), m*n, AsGpuStreamValue(stream));
+
+        hipError = hipStreamSynchronize(AsGpuStreamValue(stream));
+
+        int dev;
+        hipGetDevice(&dev);
+        printf("<%d> %d  %e %e -> %e (f8) / %e (f16)\n", dev, numeric_options.grad_flags & 3, stdev(va), stdev(vb), stdev(vc8), stdev(vc));
+
+        if(ainf || binf || cinf8)
+        {
+          printf("<%d> infinities in gemm_ex %s (%d %d %d); inputs %e %e\n", dev, report_string.c_str(), ainf, binf, cinf8, stdev(va), stdev(vb));
+          //printf("ERROR: non-finite output from rocblas_gemm_ex3 (%s)\n", report_string.c_str());
+          /*
+          */
+          //if(!isfinite(float(check[2][0]))) 
+          if((numeric_options.grad_flags & 3) == 0)
+          {
+            printf("Inputs:\nA\tB\n");
+            for(int i=0; i<4; i++)
+              printf("%e %e\n", float(va[i]), float(vb[i]));
+            printf("Outputs:\nF8\tF16\n");
+            for(int i=0; i<4; i++)
+              printf("%04x %04x  %e %e\n", *(uint16_t*)(&vc8[i]), *(uint16_t*)(&vc[i]), 
+                float(vc8[i]), float(vc[i]));
+            double mean, maxval;
+            eval_differences(vc, vc8, mean, maxval);
+            printf("Mean difference: %e, max difference: %e\n", mean, maxval);
+            fflush(stdout);
+
+            printf("Nonfinite: %d (A) %d (B) %d (C-f8)\n", ainf, binf, cinf8);
+
+            float* pa32, *pb32, *pc32;
+            hipMalloc((void**)&pa32, va.size()*4);
+            hipMalloc((void**)&pb32, vb.size()*4);
+            hipMalloc((void**)&pc32, vc.size()*4);
+            for(int i=0; i<va.size(); i++)
+              pa32[i] = float(va[i]);
+            for(int i=0; i<vb.size(); i++)
+              pb32[i] = float(vb[i]);
+            float alpha32=1.0f, beta32=0.0f;
+
+            status = DoBlasInternalStatus(
+              wrap::rocblas_gemm_ex, stream, /* pointer_mode_host = */ true,
+              ROCMBlasTranspose(transa), ROCMBlasTranspose(transb),
+              (rocblas_int)m, (rocblas_int)n, (rocblas_int)k, &alpha32, pa32,
+              rocblas_datatype_f32_r, lda, pb32, rocblas_datatype_f32_r,
+              ldb, &beta32, c->opaque(), rocblas_datatype_f32_r, ldc, pc32,
+              rocblas_datatype_f32_r, ldc, rocblas_datatype_f32_r,
+              rocblas_gemm_algo_standard, 0, 0);
+
+            hipError = hipStreamSynchronize(AsGpuStreamValue(stream));
+
+            for(int i=0; i<vc.size(); i++)
+            {
+                if(!isfinite(float(vc[i])) || !isfinite(float(vc8[i])))
+                {
+                  printf("%d   %04x %04x  %e %e  %e\n", i, *(uint16_t*)&vc[i], *(uint16_t*)&vc8[i], 
+                     float(vc[i]), float(vc8[i]), pc32[i]);
+                  break;
+                }
+            }          
+            fflush(stdout);
+            exit(0);
+          }
+        }
+      }
+      maybe_stop_timer(timer, report_string, m*n*k*2);
+      return retval;
+    }
+  }
+#endif // ROCBLAS_VERSION_MAJOR>3 || (ROCBLAS_VERSION_MAJOR==3 && ROCBLAS_VERSION_MINOR>=1) 
+  report_string = prefix + report_string;
+
+  auto call_gemm = [&](auto func, auto alphaT, auto betaT) {
+         return DoBlasInternalStatus(
+            func, stream, /* pointer_mode_host = */ true,
+            ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
+                  &alphaT,
+            reinterpret_cast<const decltype(alphaT) *>(a.opaque()), lda,
+            reinterpret_cast<const decltype(alphaT) *>(b.opaque()), ldb,
+            &betaT,
+            reinterpret_cast<decltype(&alphaT)>(c->opaque()), ldc);
+    };
+
+  maybe_start_timer(timer, stream);
   switch (dtype) {
-    case blas::DataType::kHalf: {
+    case blas::DataType::kHalf:
       if (has_mfma_) {
         VLOG(1) << "Using rocblas_gemm_ex";
         uint32_t flags = rocblas_gemm_flags_none;
@@ -492,7 +877,7 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
         if (is_backprop && use_hgemm_alt_impl_)
           flags = rocblas_gemm_flags_fp16_alt_impl;
 #endif
-        return DoBlasInternalStatus(
+        status = DoBlasInternalStatus(
             wrap::rocblas_gemm_ex, stream, /* pointer_mode_host = */ true,
             ROCMBlasTranspose(transa), ROCMBlasTranspose(transb),
             (rocblas_int)m, (rocblas_int)n, (rocblas_int)k, alpha, a.opaque(),
@@ -504,7 +889,7 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
         VLOG(1) << "Using rocblas_hgemm";
         const Eigen::half alpha_half(*static_cast<const float *>(alpha));
         const Eigen::half beta_half(*static_cast<const float *>(beta));
-        return DoBlasInternalStatus(
+        status = DoBlasInternalStatus(
             wrap::rocblas_hgemm, stream, /* pointer_mode_host = */ true,
             ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
             reinterpret_cast<const rocblas_half *>(&alpha_half),
@@ -513,9 +898,9 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
             reinterpret_cast<const rocblas_half *>(&beta_half),
             reinterpret_cast<rocblas_half *>(c->opaque()), ldc);
       }
-    }
+      break;
     case blas::DataType::kBF16:
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_gemm_ex, stream, /* pointer_mode_host = */ true,
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), (rocblas_int)m,
           (rocblas_int)n, (rocblas_int)k, alpha, a.opaque(),
@@ -523,8 +908,11 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
           ldb, beta, c->opaque(), rocblas_datatype_bf16_r, ldc, c->opaque(),
           rocblas_datatype_bf16_r, ldc, rocblas_datatype_f32_r,
           rocblas_gemm_algo_standard, 0, 0);
+      break;
     case blas::DataType::kFloat:
-      return DoBlasInternalStatus(
+      status = call_gemm(wrap::rocblas_sgemm, *(float*)alpha, *(float*)beta);
+#if 0
+      status = DoBlasInternalStatus(
           wrap::rocblas_sgemm, stream, /* pointer_mode_host = */ true,
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
           static_cast<const float *>(alpha),
@@ -532,8 +920,10 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
           static_cast<const float *>(b.opaque()), ldb,
           static_cast<const float *>(beta), static_cast<float *>(c->opaque()),
           ldc);
+#endif
+      break;
     case blas::DataType::kDouble:
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_dgemm, stream, /* pointer_mode_host = */ true,
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
           static_cast<const double *>(alpha),
@@ -541,34 +931,39 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
           static_cast<const double *>(b.opaque()), ldb,
           static_cast<const double *>(beta), static_cast<double *>(c->opaque()),
           ldc);
+      break;
     case blas::DataType::kComplexFloat: {
       auto cb_alpha =
           complex_cast(*static_cast<const std::complex<float> *>(alpha));
       auto cb_beta =
           complex_cast(*static_cast<const std::complex<float> *>(beta));
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_cgemm, stream, /* pointer_mode_host = */ true,
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
           cb_alpha, static_cast<const rocblas_float_complex *>(a.opaque()), lda,
           static_cast<const rocblas_float_complex *>(b.opaque()), ldb, cb_beta,
           static_cast<rocblas_float_complex *>(c->opaque()), ldc);
+      break;
     }
     case blas::DataType::kComplexDouble: {
       auto cb_alpha =
           complex_cast(*static_cast<const std::complex<double> *>(alpha));
       auto cb_beta =
           complex_cast(*static_cast<const std::complex<double> *>(beta));
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_zgemm, stream, /* pointer_mode_host = */ true,
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
           cb_alpha, static_cast<const rocblas_double_complex *>(a.opaque()),
           lda, static_cast<const rocblas_double_complex *>(b.opaque()), ldb,
           cb_beta, static_cast<rocblas_double_complex *>(c->opaque()), ldc);
+      break;
     }
     default:
-      return tsl::errors::Internal("Unsupported datatype for GEMM: ",
+      status = tsl::errors::Internal("Unsupported datatype for GEMM: ",
                                    blas::DataTypeString(dtype));
   }
+  maybe_stop_timer(timer, report_string, m*n*k*2);
+  return status;
 }
 
 tsl::Status ROCMBlas::DoBlasGemmWithAlgorithm(
@@ -854,6 +1249,23 @@ tsl::Status ROCMBlas::DoBlasGemmBatchedInternal(
     return c_allocation_status;
   }
 
+  std::optional<gpu::GpuTimer> timer;
+  maybe_start_timer(timer, stream);
+
+  std::string prefix;
+  if (std::is_same_v<T, Eigen::half>)
+    prefix="F16";
+  else if (std::is_same_v<T, Eigen::bfloat16>)
+    prefix="BF16";
+  else if (std::is_same_v<T, float>)
+    prefix="F32";
+  std::string report_string = " matmul B " + std::to_string(batch_count)
+    + " M " + std::to_string(m)
+    + " N " + std::to_string(n) + " K " + std::to_string(k) 
+    + " "
+    + ((transa == blas::Transpose::kNoTranspose) ? "N" : "T")
+    + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T");
+
   MAPPED_T *alpha_ptr = reinterpret_cast<MAPPED_T *>(&alpha);
   MAPPED_T *beta_ptr = reinterpret_cast<MAPPED_T *>(&beta);
   bool ok = DoBlasInternal(rocblas_func, stream, /* pointer_mode_host = */ true,
@@ -865,6 +1277,8 @@ tsl::Status ROCMBlas::DoBlasGemmBatchedInternal(
   if (!ok)
     return tsl::Status(absl::StatusCode::kInternal,
                        "failed BLAS call, see log for details");
+  maybe_stop_timer(timer, report_string, uint64_t(batch_count)*m*n*k*2);
+
   if (reallocated_c)
     return ReorganizeMemory(stream, &c, c_raw_ptrs, batch_count, batch_stride_c,
                             false);
@@ -1200,6 +1614,24 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
     exit(-1);
   }
 
+  std::optional<gpu::GpuTimer> timer;
+  maybe_start_timer(timer, stream);
+  std::string prefix;
+  if (dtype==blas::DataType::kHalf)
+    prefix="F16";
+  else if (dtype==blas::DataType::kBF16)
+    prefix="BF16";
+  else if (dtype==blas::DataType::kFloat)
+    prefix="F32";
+  std::string report_string = prefix + " matmul BS " + std::to_string(batch_count)
+    + " M " + std::to_string(m)
+    + " N " + std::to_string(n) + " K " + std::to_string(k) 
+    + " "
+    + ((transa == blas::Transpose::kNoTranspose) ? "N" : "T")
+    + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T");
+
+  tsl::Status status;
+
   switch (dtype) {
     case blas::DataType::kHalf: {
       const Eigen::half alpha_half(*static_cast<const float *>(alpha));
@@ -1210,7 +1642,7 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
 
         if (is_backprop && use_hgemm_alt_impl_)
           flags = rocblas_gemm_flags_fp16_alt_impl;
-        return DoBlasInternalStatus(
+        status = DoBlasInternalStatus(
           wrap::rocblas_gemm_strided_batched_ex, stream,
           false, /* pointer_mode_host */
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k, alpha,
@@ -1220,7 +1652,7 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
           rocblas_datatype_f16_r, ldc, stride_c, batch_count,
           rocblas_datatype_f32_r, rocblas_gemm_algo_standard, 0, flags);
       } else {
-        return DoBlasInternalStatus(
+        status = DoBlasInternalStatus(
             wrap::rocblas_hgemm_strided_batched, stream,
             false, /* pointer_mode_host */
             ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
@@ -1231,9 +1663,10 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
             reinterpret_cast<rocblas_half *>(c->opaque()), ldc, stride_c,
             batch_count);
       }
+      break;
     }
     case blas::DataType::kBF16:
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_gemm_strided_batched_ex, stream,
           false, /* pointer_mode_host */
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k, alpha,
@@ -1242,8 +1675,9 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
           rocblas_datatype_bf16_r, ldc, stride_c, c->opaque(),
           rocblas_datatype_bf16_r, ldc, stride_c, batch_count,
           rocblas_datatype_f32_r, rocblas_gemm_algo_standard, 0, 0);
+      break;
     case blas::DataType::kFloat:
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_sgemm_strided_batched, stream,
           false, /* pointer_mode_host */
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
@@ -1253,7 +1687,7 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
           reinterpret_cast<const float *>(beta),
           reinterpret_cast<float *>(c->opaque()), ldc, stride_c, batch_count);
     case blas::DataType::kDouble:
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_dgemm_strided_batched, stream,
           false, /* pointer_mode_host */
           ROCMBlasTranspose(transa), ROCMBlasTranspose(transb), m, n, k,
@@ -1262,12 +1696,13 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
           reinterpret_cast<const double *>(b.opaque()), ldb, stride_b,
           reinterpret_cast<const double *>(beta),
           reinterpret_cast<double *>(c->opaque()), ldc, stride_c, batch_count);
+      break;
     case blas::DataType::kComplexFloat: {
       auto cb_alpha =
           complex_cast(*static_cast<const std::complex<float> *>(alpha));
       auto cb_beta =
           complex_cast(*static_cast<const std::complex<float> *>(beta));
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_cgemm_strided_batched, stream,
           /* pointer_mode_host = */ true, ROCMBlasTranspose(transa),
           ROCMBlasTranspose(transb), m, n, k, cb_alpha,
@@ -1275,13 +1710,14 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
           static_cast<const rocblas_float_complex *>(b.opaque()), ldb, stride_b,
           cb_beta, static_cast<rocblas_float_complex *>(c->opaque()), ldc,
           stride_c, batch_count);
+      break;
     }
     case blas::DataType::kComplexDouble: {
       auto cb_alpha =
           complex_cast(*static_cast<const std::complex<double> *>(alpha));
       auto cb_beta =
           complex_cast(*static_cast<const std::complex<double> *>(beta));
-      return DoBlasInternalStatus(
+      status = DoBlasInternalStatus(
           wrap::rocblas_zgemm_strided_batched, stream,
           /* pointer_mode_host = */ true, ROCMBlasTranspose(transa),
           ROCMBlasTranspose(transb), m, n, k, cb_alpha,
@@ -1290,11 +1726,15 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
           ldb, stride_b, cb_beta,
           static_cast<rocblas_double_complex *>(c->opaque()), ldc, stride_c,
           batch_count);
+      break;
     }
     default:
       return tsl::errors::Internal(absl::StrCat(
           "Unsupported datatype for GEMM: ", blas::DataTypeString(dtype)));
   }
+
+  maybe_stop_timer(timer, report_string, uint64_t(batch_count)*m*n*k*2);
+  return status;
 }
 
 tsl::Status ROCMBlas::GetVersion(string *version) {

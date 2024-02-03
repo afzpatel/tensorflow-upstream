@@ -1967,10 +1967,13 @@ static tsl::StatusOr<T> GetSimpleAttribute(hipDevice_t device,
   // to allow for late allocations by internal ROCm libraries
   // (e.g. rocBLAS alone needs~200 MB to put its kernels as of ROCm 4.1)
   const uint64_t RESERVED_GFX908 = 1048576 * 512;
-  const uint64_t RESERVED_GFX9_X = 1048576 * 1024;
+  const uint64_t RESERVED_GFX9_X = 4'000'000'000ull;
+  const uint64_t RESERVED_GFX94_X = 16'000'000'000ull;
   const uint64_t RESERVED_GFX10_X = 1048576 * 512;
   if (compute_capability.gfx_version() == "gfx908") {
     *reserve = RESERVED_GFX908;
+  } else if (compute_capability.gfx9_mi300_or_later()) {
+    *reserve = RESERVED_GFX94_X;
   } else if (compute_capability.gfx9_mi200_or_later()) {
     *reserve = RESERVED_GFX9_X;
   } else if (compute_capability.navi21() || compute_capability.navi31()) {

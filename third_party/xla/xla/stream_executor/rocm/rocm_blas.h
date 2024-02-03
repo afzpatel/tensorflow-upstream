@@ -190,6 +190,7 @@ class ROCMBlas : public blas::BlasSupport {
       DeviceMemorySlice<T> a_ptrs_to_wrappers, int lda,
       DeviceMemorySlice<T> b_ptrs_to_wrappers, int ldb, T beta,
       DeviceMemorySlice<T> c_ptrs_to_wrappers, int ldc, int batch_count,
+      const NumericOptions& numeric_options,
       ScratchAllocator *scratch_allocator);
 
   // mutex that guards the rocBLAS handle for this device.

@@ -275,6 +275,7 @@ FOREACH_ROCBLAS_API(ROCBLAS_API_WRAPPER)
 
 #if ROCBLAS_VERSION_MAJOR>3 || (ROCBLAS_VERSION_MAJOR==3 && ROCBLAS_VERSION_MINOR>=1)
 ROCBLAS_API_WRAPPER(rocblas_gemm_ex3)
+ROCBLAS_API_WRAPPER(rocblas_gemm_strided_batched_ex3)
 #endif
 
 }  // namespace wrap

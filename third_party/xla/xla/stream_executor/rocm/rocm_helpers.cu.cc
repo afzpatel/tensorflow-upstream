@@ -17,6 +17,11 @@ limitations under the License.
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#if !(defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+#define HIP_HOST_DEVICE __device__
+#include "rocblas/internal/rocblas_hip_f8_impl.h"
+#endif
+
 #include <limits>
 
 namespace stream_executor {
@@ -29,30 +34,39 @@ __global__ void rocm_castHalf2FloatKernel(float* dst, __half* src, int size) {
 
 __device__ inline __half fp8_to_half(uint32_t i32val)
 {
-    float    fval;
     // upcast
+#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+    float fval;
     asm volatile("v_cvt_f32_fp8 %0, %1 src0_sel:BYTE_0" : "=v"(fval) : "v"(i32val));
     return __float2half(fval);
+#else
+    half hval = rocblas_hip_f8_impl::cast_from_f8<3,4,_Float16,true>(i32val & 0xFF);
+    return __half(hval);
+#endif
 }
 
 __device__ inline __half bf8_to_half(uint32_t i32val)
 {
+#if (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
     float    fval;
-    // upcast
     asm volatile("v_cvt_f32_bf8 %0, %1 src0_sel:BYTE_0" : "=v"(fval) : "v"(i32val));
     return __float2half(fval);
+#else
+    half hval = rocblas_hip_f8_impl::cast_from_f8<2,5,_Float16,true>(i32val & 0xFF);
+    return __half(hval);
+#endif
 }
 
 template <int T>
-__global__ void rocm_castHalf2F8Kernel(uint8_t* dst, const __half* src, int size, uint32_t seed) {
-    for (int i = threadIdx.x + blockIdx.x * 256; i*4 < size; i+=blockDim.x*gridDim.x) {
+__global__ void rocm_castHalf2F8Kernel(uint8_t* dst, const __half* src, uint64_t size, uint32_t seed) {
+    for (uint64_t i = threadIdx.x + blockIdx.x * 256; i*4 < size; i+=blockDim.x*gridDim.x) {
        uint32_t ival = 0;
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
        uint32_t u32_0 = *(uint32_t*)&src[4*i];
        uint32_t u32_1 = *(uint32_t*)&src[4*i+2];
        uint32_t rng = u32_0 ^ ((u32_1 >> 11) | (u32_1 << 21));
        rng *= 0x7000149;
        rng = rng ^ (i * 0x9701241f) ^ seed;
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
        if(T==0) {
          ival = __builtin_amdgcn_cvt_sr_fp8_f32(__half2float(src[4*i+0]), rng, ival, 0);
          ival = __builtin_amdgcn_cvt_sr_fp8_f32(__half2float(src[4*i+1]), (rng<<8)|(rng>>24), ival, 1);
@@ -70,15 +84,20 @@ __global__ void rocm_castHalf2F8Kernel(uint8_t* dst, const __half* src, int size
         else
           ival = __builtin_amdgcn_cvt_pk_bf8_f32(__half2float(src[2*i+0]), __half2float(src[2*i+1]), 0, false);
         */
-#endif        
+#else
+       const _Float16* psrc = (const _Float16*) src;
+       ival = rocblas_hip_f8_impl::cast_to_f8<T?2:3,T?5:4,_Float16,true,true>(psrc[4*i+0], true, rng);
+       ival |= rocblas_hip_f8_impl::cast_to_f8<T?2:3,T?5:4,_Float16,true,true>(psrc[4*i+1], true, (rng<<8)|(rng>>24)) << 8;
+       ival |= rocblas_hip_f8_impl::cast_to_f8<T?2:3,T?5:4,_Float16,true,true>(psrc[4*i+2], true, (rng<<16)|(rng>>16)) << 16;
+       ival |= rocblas_hip_f8_impl::cast_to_f8<T?2:3,T?5:4,_Float16,true,true>(psrc[4*i+3], true, (rng<<24)|(rng>>8)) << 24;
+#endif
        *(uint32_t*)(&dst[4*i]) = ival;
     }
 }
 
 template <int T>
-__global__ void rocm_castF82HalfKernel(__half* dst, const uint8_t* src, int size) {
-    for (int i = threadIdx.x + blockIdx.x * 256; i*2 < size; i+=blockDim.x*gridDim.x) {      
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)       
+__global__ void rocm_castF82HalfKernel(__half* dst, const uint8_t* src, uint64_t size) {
+    for (uint64_t i = threadIdx.x + blockIdx.x * 256; i*2 < size; i+=blockDim.x*gridDim.x) {
       uint16_t x = *(const uint16_t*)(&src[2*i+0]);
       __half f1, f2;
        if(T==0) {
@@ -90,11 +109,10 @@ __global__ void rocm_castF82HalfKernel(__half* dst, const uint8_t* src, int size
       }
       dst[2*i+0] = f1;
       dst[2*i+1] = f2;
-#endif        
     }
 }
 
-void rocm_castHalf2F8(void* stream, uint8_t* dst, const __half* src, int size, int fp8) {
+void rocm_castHalf2F8(void* stream, uint8_t* dst, const __half* src, uint64_t size, int fp8) {
   int x_blocks = (size + 1023) / 1024;
   if(x_blocks > 65536)
     x_blocks = 65536;
@@ -104,7 +122,7 @@ void rocm_castHalf2F8(void* stream, uint8_t* dst, const __half* src, int size, i
                      256, 0, (hipStream_t)stream, dst, src, size, rand() ^ (rand() << 17));
 }
 
-void rocm_castF82Half(void* stream, __half* dst, const uint8_t* src, int size, int fp8) {
+void rocm_castF82Half(void* stream, __half* dst, const uint8_t* src, uint64_t size, int fp8) {
   int x_blocks = (size + 1023) / 1024;
   if(x_blocks > 65536)
     x_blocks = 65536;

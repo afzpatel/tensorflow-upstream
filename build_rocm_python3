@@ -48,8 +48,10 @@ ROCM_PATH=$ROCM_INSTALL_DIR
 TF_PKG_LOC=/tmp/tensorflow_pkg
 if [[ -n $nightly ]]; then
 	rm -f $TF_PKG_LOC/tf_nightly_rocm*.whl
+	rm -f /tf/pkg/tf_nightly_rocm*.whl
 else
 	rm -f $TF_PKG_LOC/tensorflow*.whl
+	rm -f /tf/pkg/tensorflow*.whl
 fi
 
 PYTHON_VERSION=`python3 -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')"`

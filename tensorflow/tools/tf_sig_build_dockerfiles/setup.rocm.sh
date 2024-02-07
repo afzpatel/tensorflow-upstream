@@ -50,6 +50,7 @@ if [[ $ROCM_DEB_REPO == https://repo.radeon.com/rocm/*  ]] ; then \
 else
     bash "/${CUSTOM_INSTALL}"
 fi
+echo "deb [arch=amd64] https://repo.radeon.com/amdgpu/6.0/ubuntu focal $ROCM_BUILD_NUM" > /etc/apt/sources.list.d/amdgpu.list
 
 GPU_DEVICE_TARGETS=${GPU_DEVICE_TARGETS:-"gfx900 gfx906 gfx908 gfx90a gfx1030"}
 

@@ -64,7 +64,10 @@ echo $ROCM_PATH
 echo $GPU_DEVICE_TARGETS
 
 # install rocm
-/setup.packages.sh /devel.packages.rocm.txt
+if ! /setup.packages.sh /devel.packages.rocm.txt; then
+    echo "Error occurs when running setup.packages.sh..."
+    exit 1
+fi
 
 apt-get update --allow-insecure-repositories
 MIOPENKERNELS=$( \

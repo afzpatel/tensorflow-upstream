@@ -195,12 +195,12 @@ void ApplyDropout<GPUDevice, T>::operator()(const GPUDevice& d, T* out, uint8* m
         RNGAndApplyDropoutKernel<half2, half2, half2>, num_blocks,
         kThreadInBlock, 0, d.stream(), gen, num_elements,
         reinterpret_cast<half2*>(out), mask, reinterpret_cast<const half2*>(in),
-        __floats2half2_rn(rate, rate), __floats2half2_rn(scale, scale)));
+        half2{Eigen::half(rate)}, half2{Eigen::half(scale)}));
   } else {
     TF_CHECK_OK(GpuLaunchKernel(
         RNGAndApplyDropoutKernel<T, half2, float2>, num_blocks, kThreadInBlock,
         0, d.stream(), gen, num_elements, out, mask, in,
-        __floats2half2_rn(rate, rate), make_float2(scale, scale)));
+        half2{Eigen::half(rate)}, make_float2(scale, scale)));
   }
 }
 

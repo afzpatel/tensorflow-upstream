@@ -70,3 +70,6 @@ RUN if [ -n "${DWLD_TF_SRC_CMD}" ]; then eval "${DWLD_TF_SRC_CMD}"; fi
 ARG CLONE_TEST_REPO
 COPY ${CLONE_TEST_REPO} /${CLONE_TEST_REPO}
 RUN if [ -n "${CLONE_TEST_REPO}" ]; then bash /${CLONE_TEST_REPO}; fi
+
+# Remove intermediate generated files.
+RUN rm -f /*.sh /*.txt /*.bash /*.deb /*.py /opt/rocm/bin/target.lst

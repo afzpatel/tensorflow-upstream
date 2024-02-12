@@ -53,3 +53,6 @@ RUN git clone https://github.com/tensorflow/models.git
 RUN git clone https://github.com/tensorflow/examples.git
 RUN git clone https://github.com/tensorflow/autograph.git
 RUN git clone https://github.com/tensorflow/benchmarks.git
+
+# Remove intermediate generated files.
+RUN rm -f /*.sh /*.txt /*.bash /*.deb /*.py /opt/rocm/bin/target.lst

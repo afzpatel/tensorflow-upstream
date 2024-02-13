@@ -75,3 +75,4 @@ else
               -//tensorflow/lite/... \
               -//tensorflow/tools/toolchains/... \
               -//tensorflow/compiler/xla/service/gpu/...
+fi

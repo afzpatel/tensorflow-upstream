@@ -40,6 +40,7 @@ limitations under the License.
 #include "tensorflow/core/util/determinism.h"
 #include "tensorflow/core/util/util.h"
 
+
 namespace tensorflow {
 
 typedef Eigen::ThreadPoolDevice CPUDevice;

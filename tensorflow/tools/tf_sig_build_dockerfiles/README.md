@@ -111,6 +111,8 @@ For CUDA
 
 For ROCM
 
+    - `rocm/tensorflow-build:latest-python3.12`
+    - `rocm/tensorflow-build:latest-python3.11`
     - `rocm/tensorflow-build:latest-python3.10`
     - `rocm/tensorflow-build:latest-python3.9`
     - `rocm/tensorflow-build:latest-python3.8`

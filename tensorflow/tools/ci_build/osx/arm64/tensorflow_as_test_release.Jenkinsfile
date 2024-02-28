@@ -121,6 +121,38 @@ pipeline {
 
                     }
                 }
+                stage("Python 3.12") {
+                    agent {
+                        label "silicon-ci-release"
+                    }
+                    environment {
+                        PYENV_ROOT="$HOME/.pyenv"
+                        PATH="$PYENV_ROOT/shims:/opt/homebrew/bin/:$PATH"
+                        TF_PYTHON_VERSION=3.12
+                    }
+                    steps {
+
+                        sh '''
+                            pyenv init -
+                        '''
+                        sh 'python --version'
+
+                        git branch: "${RELEASE_BRANCH}",
+                            url: "https://github.com/tensorflow/tensorflow.git"
+
+                        sh '''
+                            pip install --upgrade pip
+                            pip install -r ./tensorflow/tools/ci_build/release/requirements_mac.txt
+                        '''
+
+                        sh '''
+                            bazel --bazelrc="${WORKSPACE}/tensorflow/tools/ci_build/osx/arm64/.macos.bazelrc" test \
+                            --config=nonpip
+                            '''
+
+                    }
+                }
+
             }
         }
     }

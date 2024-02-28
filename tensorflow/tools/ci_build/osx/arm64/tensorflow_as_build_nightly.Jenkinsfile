@@ -163,8 +163,55 @@ pipeline {
                         sh 'python ${WORKSPACE}/tensorflow/tensorflow/tools/ci_build/osx/arm64/tensorflow_metal_plugin_test.py'
                     }
                 }
+               stage("Python 3.12") {
+                    agent {
+                        label "nightly-build"
+                    }
+                    environment {
+                        PYENV_ROOT="$HOME/.pyenv"
+                        PATH="$PYENV_ROOT/shims:/opt/homebrew/bin/:$PATH"
+                        TF_PYTHON_VERSION=3.12
+                    }
+                    steps {
+
+                        dir('tensorflow') {
+
+                            sh '''
+                                pyenv init -
+                            '''
+
+                            sh 'python --version'
+
+                            git branch: "nightly",
+                                url: "https://github.com/tensorflow/tensorflow.git"
+
+                            sh '''
+                                pip install --upgrade pip
+                                pip install -r ./tensorflow/tools/ci_build/release/requirements_mac.txt
+                                python tensorflow/tools/ci_build/update_version.py --nightly
+                            '''
+
+                            // Install Pillow for metal plugin tests
+                            sh 'pip install Pillow'
+
+                            sh '''
+                                /opt/homebrew/bin/bazel --bazelrc="${WORKSPACE}/tensorflow/tensorflow/tools/ci_build/osx/arm64/.macos.bazelrc" build \
+                                //tensorflow/tools/pip_package:build_pip_package
+
+                                ./bazel-bin/tensorflow/tools/pip_package/build_pip_package \
+                                --nightly_flag \
+                                --project_name "tf-nightly-macos" \
+                                dist
+                            '''
+                        }
+
+                        archiveArtifacts artifacts: "tensorflow/dist/*.whl", followSymlinks: false, onlyIfSuccessful: true
+
+                        sh 'python ${WORKSPACE}/tensorflow/tensorflow/tools/ci_build/osx/arm64/tensorflow_metal_plugin_test.py'
+                    }
+
             }
-        } 
+        }
     }
     post {
         always {

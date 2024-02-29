@@ -31,7 +31,7 @@ export TF_PYTHON_VERSION=$PYTHON_VERSION
 export TF_NEED_ROCM=0
 export TF_NEED_CLANG=0
 
-if [ -f /usertools/cpu.bazelrc ]; then
+if [ -f /usertools/cpu_gcc.bazelrc ]; then
         # Use the bazelrc files in /usertools if available
 	if [ ! -d /tf ];then
            # The bazelrc files in /usertools expect /tf to exist
@@ -41,7 +41,7 @@ if [ -f /usertools/cpu.bazelrc ]; then
           --bazelrc=/usertools/cpu.bazelrc \
           test \
           --config=sigbuild_local_cache \
-          --config=pycpp \
+          --config=nonpip \
           --action_env=TF_PYTHON_VERSION=$PYTHON_VERSION \
           --local_test_jobs=${N_BUILD_JOBS} \
           --jobs=${N_BUILD_JOBS}

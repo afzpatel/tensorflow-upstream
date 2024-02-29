@@ -604,12 +604,12 @@ build:release_linux_base --config=avx_linux
 # Can be removed once upb is updated, since a type definition is used within
 # offset of in the current version of ubp.
 # See https://github.com/protocolbuffers/upb/blob/9effcbcb27f0a665f9f345030188c0b291e32482/upb/upb.c#L183.
-build:release_linux_base --copt=-Wno-gnu-offsetof-extensions
-build:release_linux_base --copt=-Wno-error=array-parameter
-build:release_linux_base --copt=-Wno-error=unused-command-line-argument
+#build:release_linux_base --copt=-Wno-gnu-offsetof-extensions
+#build:release_linux_base --copt=-Wno-error=array-parameter
+#build:release_linux_base --copt=-Wno-error=unused-command-line-argument
 # Set lld as the linker.
-build:release_linux_base --linkopt="-fuse-ld=lld"
-build:release_linux_base --linkopt="-lm"
+#build:release_linux_base --linkopt="-fuse-ld=lld"
+#build:release_linux_base --linkopt="-lm"
 
 # We have some invalid linker scripts in the build,
 # so we need to disable this check
@@ -632,7 +632,9 @@ test:release_linux_base --test_summary=short
 
 # Use the Clang toolchain to compile
 build:release_cpu_linux --config=release_linux_base
-build:release_cpu_linux --crosstool_top="@sigbuild-r2.14-clang_config_cuda//crosstool:toolchain"
+# GPU Toolchain is defined here for the CPU release config
+# This isn't very flexible and not needed
+#build:release_cpu_linux --crosstool_top="@sigbuild-r2.14-clang_config_cuda//crosstool:toolchain"
 
 build:release_gpu_linux --config=release_cpu_linux
 # Set up compilation CUDA version and paths and use the CUDA Clang toolchain.

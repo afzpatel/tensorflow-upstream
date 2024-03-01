@@ -28,17 +28,17 @@ export PYTHON_BIN_PATH=`which python3`
 
 export TF_NEED_ROCM=0
 
-if [ -f /usertools/cpu.bazelrc ]; then
+if [ -f /usertools/cpu_gcc.bazelrc ]; then
         # Use the bazelrc files in /usertools if available
 	if [ ! -d /tf ];then
            # The bazelrc files in /usertools expect /tf to exist
            mkdir /tf
         fi
         bazel \
-          --bazelrc=/usertools/cpu.bazelrc \
+          --bazelrc=/usertools/cpu_gcc.bazelrc \
           test \
           --config=sigbuild_local_cache \
-          --config=pycpp \
+          --config=nonpip \
           --local_test_jobs=${N_BUILD_JOBS} \
           --jobs=${N_BUILD_JOBS}
 else

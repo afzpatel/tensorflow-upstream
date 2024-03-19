@@ -1,4 +1,4 @@
-From 75f3e4872e0ddc9e01ce2e03a784f9a7704b7940 Mon Sep 17 00:00:00 2001
+From b0eb79755ff53f1597df553234a98cda48fba095 Mon Sep 17 00:00:00 2001
 From: Dragan Mladjenovic <Dragan.Mladjenovic@amd.com>
 Date: Fri, 15 Mar 2024 11:33:27 +0000
 Subject: [PATCH] Accept rocm 6.2 bitcode files
@@ -12,7 +12,7 @@ Subject: [PATCH] Accept rocm 6.2 bitcode files
  5 files changed, 26 insertions(+), 3 deletions(-)
 
 diff --git a/llvm/include/llvm/Bitcode/LLVMBitCodes.h b/llvm/include/llvm/Bitcode/LLVMBitCodes.h
-index 52e76356a892..6a154564aaee 100644
+index 5d7be5ca936a..496305c06e94 100644
 --- a/llvm/include/llvm/Bitcode/LLVMBitCodes.h
 +++ b/llvm/include/llvm/Bitcode/LLVMBitCodes.h
 @@ -505,6 +505,9 @@ enum FastMathMap {
@@ -25,17 +25,17 @@ index 52e76356a892..6a154564aaee 100644
  /// PossiblyExactOperatorOptionalFlags - Flags for serializing
  /// PossiblyExactOperator's SubclassOptionalData contents.
  enum PossiblyExactOperatorOptionalFlags { PEO_EXACT = 0 };
-@@ -713,6 +716,8 @@ enum AttributeKindCodes {
-   ATTR_KIND_SKIP_PROFILE = 85,
+@@ -714,6 +717,8 @@ enum AttributeKindCodes {
    ATTR_KIND_MEMORY = 86,
    ATTR_KIND_NOFPCLASS = 87,
+   ATTR_KIND_OPTIMIZE_FOR_DEBUGGING = 88,
 +  ATTR_KIND_WRITABLE = 89,
 +  ATTR_KIND_DEAD_ON_UNWIND = 91,
  };
  
  enum ComdatSelectionKindCodes {
 diff --git a/llvm/include/llvm/IR/Attributes.td b/llvm/include/llvm/IR/Attributes.td
-index aba1d718f7f7..b9c2e07c5bf5 100644
+index fda79f5f2449..0eed2939995e 100644
 --- a/llvm/include/llvm/IR/Attributes.td
 +++ b/llvm/include/llvm/IR/Attributes.td
 @@ -151,6 +151,9 @@ def NoDuplicate : EnumAttr<"noduplicate", [FnAttr]>;
@@ -49,10 +49,10 @@ index aba1d718f7f7..b9c2e07c5bf5 100644
  def NoImplicitFloat : EnumAttr<"noimplicitfloat", [FnAttr]>;
  
 diff --git a/llvm/lib/Bitcode/Reader/BitcodeReader.cpp b/llvm/lib/Bitcode/Reader/BitcodeReader.cpp
-index 1d1ec988a93d..20b1598fd0a6 100644
+index 28addb9068b2..a3e848afb6dd 100644
 --- a/llvm/lib/Bitcode/Reader/BitcodeReader.cpp
 +++ b/llvm/lib/Bitcode/Reader/BitcodeReader.cpp
-@@ -2056,6 +2056,9 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
+@@ -2058,6 +2058,9 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
      return Attribute::Hot;
    case bitc::ATTR_KIND_PRESPLIT_COROUTINE:
      return Attribute::PresplitCoroutine;
@@ -62,7 +62,7 @@ index 1d1ec988a93d..20b1598fd0a6 100644
    }
  }
  
-@@ -2169,6 +2172,9 @@ Error BitcodeReader::parseAttributeGroupBlock() {
+@@ -2171,6 +2174,9 @@ Error BitcodeReader::parseAttributeGroupBlock() {
              B.addUWTableAttr(UWTableKind::Default);
            else if (Attribute::isEnumAttrKind(Kind))
              B.addAttribute(Kind);
@@ -72,7 +72,7 @@ index 1d1ec988a93d..20b1598fd0a6 100644
            else
              return error("Not an enum attribute");
          } else if (Record[i] == 1) { // Integer attribute
-@@ -4875,12 +4881,12 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
+@@ -4877,12 +4883,12 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
        Value *Op;
        unsigned OpTypeID;
        if (getValueTypePair(Record, OpNum, NextValueNo, Op, OpTypeID, CurBB) ||
@@ -88,7 +88,7 @@ index 1d1ec988a93d..20b1598fd0a6 100644
        if (Opc == -1 || !ResTy)
          return error("Invalid record");
        Instruction *Temp = nullptr;
-@@ -4896,6 +4902,12 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
+@@ -4898,6 +4904,12 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
            return error("Invalid cast");
          I = CastInst::Create(CastOp, Op, ResTy);
        }
@@ -102,10 +102,10 @@ index 1d1ec988a93d..20b1598fd0a6 100644
        break;
      }
 diff --git a/llvm/lib/Bitcode/Writer/BitcodeWriter.cpp b/llvm/lib/Bitcode/Writer/BitcodeWriter.cpp
-index e991d055f334..89c352d61cc9 100644
+index c427459508ec..50cb38faa2bc 100644
 --- a/llvm/lib/Bitcode/Writer/BitcodeWriter.cpp
 +++ b/llvm/lib/Bitcode/Writer/BitcodeWriter.cpp
-@@ -828,6 +828,8 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
+@@ -830,6 +830,8 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
    case Attribute::EmptyKey:
    case Attribute::TombstoneKey:
      llvm_unreachable("Trying to encode EmptyKey/TombstoneKey");
@@ -115,10 +115,10 @@ index e991d055f334..89c352d61cc9 100644
  
    llvm_unreachable("Trying to encode unknown attribute");
 diff --git a/llvm/lib/Transforms/Utils/CodeExtractor.cpp b/llvm/lib/Transforms/Utils/CodeExtractor.cpp
-index 08b2b01b2ee1..52e9218d3b73 100644
+index b251a85cf85f..c029f8ad575e 100644
 --- a/llvm/lib/Transforms/Utils/CodeExtractor.cpp
 +++ b/llvm/lib/Transforms/Utils/CodeExtractor.cpp
-@@ -996,6 +996,7 @@ Function *CodeExtractor::constructFunction(const ValueSet &inputs,
+@@ -999,6 +999,7 @@ Function *CodeExtractor::constructFunction(const ValueSet &inputs,
        case Attribute::EndAttrKinds:
        case Attribute::EmptyKey:
        case Attribute::TombstoneKey:

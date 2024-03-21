@@ -901,12 +901,6 @@ Status IrEmitterUnnested::EmitConvolutionThunk(mlir::Operation* op) {
         op.getResultScale().convertToDouble());
     descriptor.backend_config.set_reordered_int8_nchw_vect(
         op.getBackendConfig().getIsCudnnReorderedInt8());
-    if(op.getGradFlags().has_value())
-      descriptor.backend_config.set_grad_conv_backend_flags(op.getGradFlags().value());
-    else {
-      printf("Attempting to emit convolution thunk with unset grad_flags\n");
-      exit(-1);
-    }
   };
 
   auto set_activation_mode = [&](auto op) -> Status {

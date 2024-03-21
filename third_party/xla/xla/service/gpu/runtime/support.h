@@ -103,9 +103,10 @@ inline StatusOr<GemmConfig> GetGemmConfig(
     double alpha_imag, double beta, absl::Span<const int64_t> lhs_batch,
     absl::Span<const int64_t> lhs_contract, absl::Span<const int64_t> rhs_batch,
     absl::Span<const int64_t> rhs_contract, int64_t compute_precision,
+    const int* dynamic_ranges,
     const std::optional<runtime::StridedMemrefView> c = std::nullopt,
-    const std::optional<runtime::StridedMemrefView>& bias = std::nullopt,
-    int grad_flags = 0) {
+    const std::optional<runtime::StridedMemrefView>& bias = std::nullopt
+    ) {
   Shape c_shape = ToShape(c.value_or(out));
   Shape bias_shape;
   Shape* bias_shape_ptr = nullptr;
@@ -116,7 +117,7 @@ inline StatusOr<GemmConfig> GetGemmConfig(
   return GemmConfig::For(ToShape(lhs), lhs_batch, lhs_contract, ToShape(rhs),
                          rhs_batch, rhs_contract, c_shape, bias_shape_ptr,
                          ToShape(out), alpha_real, alpha_imag, beta, algorithm,
-                         compute_precision, grad_flags);
+                         compute_precision, dynamic_ranges);
 }
 
 // adds Dot Dimension Attribute encodings for calls to Gemm and cuBLASLt

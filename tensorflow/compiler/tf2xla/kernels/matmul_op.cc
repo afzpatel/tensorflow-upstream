@@ -38,15 +38,9 @@ class MatMulOp : public XlaOpKernel {
  public:
   explicit MatMulOp(OpKernelConstruction* ctx, bool is_sparse = false)
       : XlaOpKernel(ctx),
-        is_sparse_(is_sparse),
-        grad_a_(false),
-        grad_b_(false) {
+        is_sparse_(is_sparse) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("transpose_a", &transpose_a_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("transpose_b", &transpose_b_));
-    if (!is_sparse) {
-      OP_REQUIRES_OK(ctx, ctx->GetAttr("grad_a", &grad_a_));
-      OP_REQUIRES_OK(ctx, ctx->GetAttr("grad_b", &grad_b_));
-    }
     if (is_sparse) {
       OP_REQUIRES_OK(ctx, ctx->GetAttr("Ta", &a_type_));
       OP_REQUIRES_OK(ctx, ctx->GetAttr("Tb", &b_type_));
@@ -59,7 +53,18 @@ class MatMulOp : public XlaOpKernel {
       OP_REQUIRES_OK(ctx, ctx->GetAttr("a_is_sparse", &dummy_is_sparse));
       OP_REQUIRES_OK(ctx, ctx->GetAttr("b_is_sparse", &dummy_is_sparse));
     }
-    numeric_flags_ = ctx->GetNumericFlags(true);
+    xla::PrecisionConfig::Precision precision =
+        tsl::tensor_float_32_execution_enabled()
+            ? xla::PrecisionConfig::DEFAULT
+            : xla::PrecisionConfig::HIGHEST;
+    //precision_config_ = GetPrecisionConfig(ctx, precision);
+    //PrecisionConfig cfg;
+    int grad_a = -1, grad_b = -1;
+    ctx->GetAttr("grad_a", &grad_a);
+    precision_config_.add_operand_precision(GradientFlagToPrecision(grad_a, precision));
+    ctx->GetAttr("grad_b", &grad_b);
+    precision_config_.add_operand_precision(GradientFlagToPrecision(grad_b, precision));
+    printf("MatMulOp: precision_config %d %d\n", (int)precision_config_.operand_precision(0), (int)precision_config_.operand_precision(1));
   }
 
   ~MatMulOp() override = default;
@@ -100,26 +105,18 @@ class MatMulOp : public XlaOpKernel {
         b = xla::ConvertElementType(b, xla::F32);
       }
     }
-    xla::PrecisionConfig::Precision precision =
-        tsl::tensor_float_32_execution_enabled()
-            ? xla::PrecisionConfig::DEFAULT
-            : xla::PrecisionConfig::HIGHEST;
-    xla::PrecisionConfig precision_config;
-    SetXlaPrecisionConfigNumericFlags(precision_config, precision, numeric_flags_);
     ctx->SetOutput(0, xla::BatchDot(a, transpose_a_, b, transpose_b_, 
-                                    precision_config,
-                                    std::nullopt, grad_a_, grad_b_));
+                                    precision_config_,
+                                    std::nullopt));
   }
 
  private:
   bool is_sparse_;
   bool transpose_a_;
   bool transpose_b_;
-  bool grad_a_;
-  bool grad_b_;
+  xla::PrecisionConfig precision_config_;
   DataType a_type_;
   DataType b_type_;
-  int numeric_flags_;
 };
 
 REGISTER_XLA_OP(Name("MatMul").TypeConstraint("T", kMatmulTypes), MatMulOp);

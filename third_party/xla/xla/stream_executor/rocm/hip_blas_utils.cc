@@ -19,6 +19,8 @@ limitations under the License.
 #include "xla/stream_executor/blas.h"
 #include "rocm/rocm_config.h"
 
+#include <map>
+
 #if TF_HIPBLASLT
 
 namespace stream_executor {
@@ -35,9 +37,10 @@ tsl::Status ToStatus(hipblasStatus_t status, const char* prefix) {
 
 hipDataType AsHipblasDataType(blas::DataType type) {
   switch (type) {
-    case blas::DataType::kF8E5M2:
     case blas::DataType::kF8E4M3FN:
-      LOG(FATAL) << "hipblaslt does not support F8 yet";
+      return HIP_R_8F_E4M3_FNUZ;
+    case blas::DataType::kF8E5M2:
+      return HIP_R_8F_E5M2_FNUZ;
     case blas::DataType::kHalf:
       return HIP_R_16F;
     case blas::DataType::kBF16:
@@ -63,6 +66,7 @@ hipblasComputeType_t AsHipblasComputeType(blas::ComputationType type) {
   if (type == blas::ComputationType::kF32 ||
       type == blas::ComputationType::kTF32AsF32)
     return HIPBLAS_COMPUTE_32F;
+    //return HIPBLAS_COMPUTE_32F_FAST_16F;
   else
     LOG(FATAL) << "unsupported hipblaslt computation type";
 }

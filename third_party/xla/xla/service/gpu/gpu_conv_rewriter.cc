@@ -707,10 +707,7 @@ StatusOr<bool> RunOnInstruction(HloInstruction* conv) {
 
   TF_ASSIGN_OR_RETURN(auto const config, conv->backend_config<xla::gpu::GemmBackendConfig>());
 
-  const PrecisionConfig& cfg = conv->precision_config();
-  int numeric_flags = GetXlaPrecisionConfigNumericFlags(&cfg);
   auto backend_config = GetDefaultBackendConfig();
-  backend_config.set_grad_conv_backend_flags(numeric_flags);
   TF_RETURN_IF_ERROR(custom_call->set_backend_config(backend_config));
 
   VLOG(1) << "Replacing convolution " << conv->ToString() << " with "

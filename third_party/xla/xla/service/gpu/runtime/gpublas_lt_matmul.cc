@@ -95,11 +95,17 @@ absl::Status DoMatmul(
 
   // Find the gemm config for this instance of matmul.
   TF_ASSIGN_OR_RETURN(GemmConfig * config, gemm_config.GetOrCreate([&] {
+    int dynamic_ranges[2]={-1,-1};
+    if(precision.size()>=2) {
+      dynamic_ranges[0] = precision[0];
+      dynamic_ranges[1] = precision[1];
+    }
     return ToAbsl(GetGemmConfig(
         a, b, d, algorithm, alpha_real, alpha_imag, beta, dot_dims.lhs_batch,
         dot_dims.lhs_contract, dot_dims.rhs_batch, dot_dims.rhs_contract,
         precision.empty() ? se::blas::kDefaultComputePrecision
                           : *absl::c_max_element(precision),
+                          dynamic_ranges,
         c, bias));
   }));
 

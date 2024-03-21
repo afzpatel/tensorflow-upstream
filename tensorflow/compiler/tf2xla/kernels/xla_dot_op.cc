@@ -45,8 +45,7 @@ class XlaDotOp : public XlaOpKernel {
         precision_config_.ParsePartialFromString(precision_config_attr),
         errors::InvalidArgument("Error parsing convolution dimension numbers"));
     preferred_element_type_ = std::nullopt;
-    SetXlaPrecisionConfigNumericFlags(precision_config_, xla::PrecisionConfig::DEFAULT,
-        context->GetNumericFlags(true));
+    printf("XlaDotOp\n");
   }
 
   void Compile(XlaOpKernelContext* context) override {

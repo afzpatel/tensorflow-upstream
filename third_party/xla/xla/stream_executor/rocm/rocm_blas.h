@@ -213,6 +213,12 @@ class ROCMBlas : public blas::BlasSupport {
   bool has_mfma_ = false;
   bool use_hgemm_alt_impl_ = false;
   bool has_f8_ = false;
+
+  uint8_t* f8_staging_buffer_ = nullptr;
+  uint64_t f8_staging_buffer_size_ = 512000000;
+
+  absl::Mutex f8_mu_;
+  hipEvent_t f8_staging_event_;
 };
 
 }  // namespace gpu

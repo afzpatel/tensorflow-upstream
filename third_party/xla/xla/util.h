@@ -753,6 +753,13 @@ void PackInt4(absl::Span<const char> input, absl::Span<char> output);
 // zero.
 void UnpackInt4(absl::Span<const char> input, absl::Span<char> output);
 
+inline PrecisionConfig::Precision GradientFlagToPrecision(int flag, PrecisionConfig::Precision defval)
+{
+  if(flag>=0 && flag<=7)
+    return PrecisionConfig::Precision(flag);
+  return defval;
+}
+
 inline PrecisionConfig PrecisionConfigDEFAULT()
 {
   PrecisionConfig cfg; 
@@ -767,59 +774,6 @@ inline PrecisionConfig PrecisionConfigHIGHEST()
   cfg.add_operand_precision(PrecisionConfig::HIGHEST);
   cfg.add_operand_precision(PrecisionConfig::HIGHEST);
   return cfg;
-}
-
-inline void SetXlaPrecisionConfigNumericFlags(PrecisionConfig& cfg, 
-  xla::PrecisionConfig::Precision precision, int grad_flags)
-{
-    //printf("SetXlaPrecisionConfigF8Flags(%d)\n", grad_flags);
-    if(cfg.operand_precision_size() == 0) {
-      cfg.add_operand_precision(precision);
-      cfg.add_operand_precision(precision);
-    }
-    else {
-      for(int i=0; i<cfg.operand_precision_size(); i++)
-      {
-          int flag = cfg.operand_precision()[i];
-          if(flag>=PrecisionConfig::ACTIVATION && flag<=PrecisionConfig::GRADIENT)
-          {
-            //printf(" => already set\n");
-            return;
-          }
-      }
-    }
-
-    bool grad_a = grad_flags & 1;
-    bool grad_b = grad_flags & 2;
-    cfg.add_operand_precision(grad_a ? PrecisionConfig::GRADIENT : PrecisionConfig::ACTIVATION);
-    cfg.add_operand_precision(grad_b ? PrecisionConfig::GRADIENT : PrecisionConfig::ACTIVATION);
-}
-
-inline void SetXlaPrecisionConfigNumericFlags(PrecisionConfig& cfg, 
-  int flags) { SetXlaPrecisionConfigNumericFlags(cfg, PrecisionConfig::HIGHEST, flags); }
-
-inline int GetXlaPrecisionConfigNumericFlags(const PrecisionConfig* precision_config)
-{
-    int cfg_flags = 0;
-    int count = 0;
-    
-    for(int i=0; i<precision_config->operand_precision_size(); i++)
-    {
-        int flag = precision_config->operand_precision()[i];
-        
-        if(flag>=PrecisionConfig::ACTIVATION && flag<=PrecisionConfig::GRADIENT)
-        {
-          
-          
-          if(count<2 && flag == PrecisionConfig::GRADIENT)
-            cfg_flags |= 1 << count;
-          
-          count++;
-        }
-    }
-    if(count==2)
-      cfg_flags |= 256;
-    return cfg_flags;
 }
 
 class HloInstruction;

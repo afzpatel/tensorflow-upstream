@@ -32,8 +32,6 @@ class BatchMatMulOp : public XlaOpKernel {
   explicit BatchMatMulOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("adj_x", &adj_x_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("adj_y", &adj_y_));
-    OP_REQUIRES_OK(ctx, ctx->GetAttr("grad_x", &grad_x_));
-    OP_REQUIRES_OK(ctx, ctx->GetAttr("grad_y", &grad_y_));
 
     if (ctx->HasAttr("Tout")) {
       DataType output_type;
@@ -43,20 +41,23 @@ class BatchMatMulOp : public XlaOpKernel {
       OP_REQUIRES_OK(ctx, DataTypeToPrimitiveType(output_type, &xla_type));
       preferred_element_type_.emplace(xla_type);
     }
-    numeric_flags_ = ctx->GetNumericFlags(true);
-  }
-
-  void Compile(XlaOpKernelContext* ctx) override {
     xla::PrecisionConfig::Precision precision =
         tsl::tensor_float_32_execution_enabled()
             ? xla::PrecisionConfig::DEFAULT
             : xla::PrecisionConfig::HIGHEST;
-    xla::PrecisionConfig precision_config;
-    SetXlaPrecisionConfigNumericFlags(precision_config, precision, numeric_flags_);
+    int grad_x = -1, grad_y = -1;
+    ctx->GetAttr("grad_x", &grad_x);
+    precision_config_.add_operand_precision(GradientFlagToPrecision(grad_x, precision));
+    ctx->GetAttr("grad_y", &grad_y);
+    precision_config_.add_operand_precision(GradientFlagToPrecision(grad_y, precision));
+    printf("BatchMatMulOp: precision_config %d %d\n", (int)precision_config_.operand_precision(0), (int)precision_config_.operand_precision(1));
+  }
+
+  void Compile(XlaOpKernelContext* ctx) override {
     auto result =
         xla::BatchDot(MaybeConjugate(ctx->Input(0), adj_x_), adj_x_,
                       MaybeConjugate(ctx->Input(1), adj_y_), adj_y_, 
-                      precision_config, preferred_element_type_, grad_x_, grad_y_);
+                      precision_config_, preferred_element_type_);
 
     ctx->SetOutput(0, result);
   }
@@ -64,10 +65,8 @@ class BatchMatMulOp : public XlaOpKernel {
  private:
   bool adj_x_;
   bool adj_y_;
-  bool grad_x_;
-  bool grad_y_;
   std::optional<xla::PrimitiveType> preferred_element_type_;
-  int numeric_flags_;
+  xla::PrecisionConfig precision_config_;
 };
 
 REGISTER_XLA_OP(Name("BatchMatMul"), BatchMatMulOp);

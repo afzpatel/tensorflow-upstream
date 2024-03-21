@@ -21,25 +21,35 @@ namespace stream_executor {
 // Options that specify the numeric behavior of operations like matrix
 // multiplications and convolutions
 struct NumericOptions {
-  NumericOptions(bool require_determinism, bool allow_tf32, int grad)
-      : require_determinism(require_determinism), allow_tf32(allow_tf32), grad_flags(grad | GF_Initialized) {}
+  NumericOptions(bool require_determinism, bool allow_tf32, int dynamic_range1=-1, int dynamic_range2=-1)
+      : require_determinism(require_determinism), allow_tf32(allow_tf32), 
+      range1(DynamicRange(dynamic_range1)), range2(DynamicRange(dynamic_range2)) {}
 
-  NumericOptions() : require_determinism(false), allow_tf32(true), grad_flags(0) {}
+  NumericOptions() : require_determinism(false), allow_tf32(true) {}
 
   // If true, the op must be deterministic
   bool require_determinism;
   // If true, float32 inputs can be rounded to TensorFloat-32 precision
   bool allow_tf32;
 
-  enum GradientFlags {
-    GF_Gradient1 = 1<<0,
-    GF_Gradient2 = 1<<1,
-    GF_Initialized = 1<<8
+  // Mirrors xla_data.proto/Precision
+  enum DynamicRange {
+    UNDEFINED = -1,
+
+    DEFAULT = 0,
+    HIGH = 1,
+    HIGHEST = 2,
+    PACKED_NIBBLE = 3,
+    E4B6 = 4,
+    E4B8 = 5,
+    E4B10 = 6,
+    E4B12 = 7,
+    E4B14 = 8,
+    E5 = 9
   };
 
-  // bit 0: interpret input 1 as gradient
-  // bit 1: interpret input 2 as gradient
-  int grad_flags;
+  DynamicRange range1=UNDEFINED;
+  DynamicRange range2=UNDEFINED;
 };
 
 }  // namespace stream_executor

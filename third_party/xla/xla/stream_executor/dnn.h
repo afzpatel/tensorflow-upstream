@@ -700,10 +700,6 @@ class ConvolutionDescriptor {
     return AsInt64Slice(proto_.paddings());
   }
 
-  int grad_flags() { return proto_.grad_flags(); }
-
-  ConvolutionDescriptor& set_grad_flags(int x) { proto_.set_grad_flags(x); return *this; }
-
   std::string name() const { return proto_.name(); }
 
  private:

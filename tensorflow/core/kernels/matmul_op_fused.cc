@@ -85,7 +85,7 @@ struct LaunchFusedMatMulOp {
       OpKernelContext* context, const Tensor& a, const Tensor& b,
       const Eigen::array<Eigen::IndexPair<Eigen::DenseIndex>, 1>& dim_pair,
       FusedComputationType fusion, const FusedComputationArgs& fusion_args,
-      Tensor* output, bool use_autotune, int grad_flags);
+      Tensor* output, bool use_autotune, int range1, int range2);
 };
 
 template <typename T>
@@ -99,7 +99,7 @@ struct LaunchFusedMatMulOp<CPUDevice, T> {
       OpKernelContext* context, const Tensor& a, const Tensor& b,
       const Eigen::array<Eigen::IndexPair<Eigen::DenseIndex>, 1>& dim_pair,
       FusedComputationType fusion, const FusedComputationArgs& fusion_args,
-      Tensor* output, bool use_autotune, int grad_flags) {
+      Tensor* output, bool use_autotune, int range1, int range2) {
     auto lhs = a.matrix<T>();
     auto rhs = b.matrix<T>();
     auto out = output->matrix<T>();
@@ -347,7 +347,7 @@ StatusOr<AutotuneEntry<se::dnn::FusedMatmulOp>> AutotuneFusedMatmul(
     int64_t ldc, se::dnn::ActivationMode activation_mode,
     se::DeviceMemory<T> a_ptr, se::DeviceMemory<T> b_ptr,
     se::DeviceMemory<T> c_ptr, se::DeviceMemory<T> bias_ptr,
-    int64_t scratch_size_limit, int grad_flags) {
+    int64_t scratch_size_limit, int range1, int range2) {
   AutotuneEntry<se::dnn::FusedMatmulOp> autotune_entry;
   auto* stream = ctx->op_device_context()->stream();
   if (!autotune_map->Find(params, &autotune_entry)) {
@@ -364,7 +364,7 @@ StatusOr<AutotuneEntry<se::dnn::FusedMatmulOp>> AutotuneFusedMatmul(
     TF_RETURN_IF_ERROR(stream->parent()->GetFusedMatmulRunners(
         CudnnUseFrontend(), element_type, element_type, element_type, stream,
         trans_a, trans_b, m, n, k, lda, ldb, ldc, activation_mode,
-        /*use_fallback=*/false, GetNumericOptions(grad_flags), &runners));
+        /*use_fallback=*/false, GetNumericOptions(range1, range2), &runners));
 
     auto launch_func =
         [&](se::ScratchAllocator* allocator_used,
@@ -408,7 +408,7 @@ StatusOr<AutotuneEntry<se::dnn::FusedMatmulOp>> AutotuneFusedMatmul(
       TF_RETURN_IF_ERROR(stream->parent()->GetFusedMatmulRunners(
           CudnnUseFrontend(), element_type, element_type, element_type, stream,
           trans_a, trans_b, m, n, k, lda, ldb, ldc, activation_mode,
-          /*use_fallback=*/true, GetNumericOptions(grad_flags), &fallback_runners));
+          /*use_fallback=*/true, GetNumericOptions(range1, range2), &fallback_runners));
 
       TF_ASSIGN_OR_RETURN(
           auto fallback_results,
@@ -437,7 +437,7 @@ struct LaunchFusedMatMulOp<GPUDevice, T> {
       OpKernelContext* context, const Tensor& a, const Tensor& b,
       const Eigen::array<Eigen::IndexPair<Eigen::DenseIndex>, 1>& dim_pair,
       FusedComputationType fusion, const FusedComputationArgs& fusion_args,
-      Tensor* output, bool use_autotune, int grad_flags) {
+      Tensor* output, bool use_autotune, int range1, int range2) {
     OP_REQUIRES(
         context, DataTypeToEnum<T>::value != DT_BFLOAT16,
         errors::InvalidArgument("_FusedMatMul doesn't support "
@@ -535,7 +535,7 @@ struct LaunchFusedMatMulOp<GPUDevice, T> {
           cudnn_matmul_params, context, trans_a, trans_b, m, n, k,
           a.dim_size(1), b.dim_size(1), output->dim_size(1),
           matmul_activation_mode, a_ptr, b_ptr, c_ptr, bias_ptr,
-          GetDnnWorkspaceLimitOrDefault(), grad_flags);
+          GetDnnWorkspaceLimitOrDefault(), range1, range2);
       OP_REQUIRES_OK(context, entry_or.status());
       auto autotune_entry = std::move(entry_or).value();
 
@@ -660,8 +660,6 @@ class FusedMatMulOp : public OpKernel {
                       "only DT_HALF data type."));
     }
     use_autotune_ = MatmulAutotuneEnable();
-    grad_flags_ = context->GetNumericFlags(true);
-    printf("grad_flags_ %d\n", grad_flags_);
   }
 
   void Compute(OpKernelContext* ctx) override {
@@ -714,14 +712,13 @@ class FusedMatMulOp : public OpKernel {
 
     auto launch = LaunchFusedMatMulOp<Device, T>();
     launch(ctx, a, b, dim_pair, fused_computation_, fused_computation_args_,
-           out, use_autotune_, grad_flags_);
+           out, use_autotune_, -1, -1);
   }
 
  private:
   bool transpose_a_;
   bool transpose_b_;
   bool use_autotune_;
-  int grad_flags_ = 0;
 
   FusedComputationType fused_computation_ = FusedComputationType::kUndefined;
   FusedComputationArgs fused_computation_args_;

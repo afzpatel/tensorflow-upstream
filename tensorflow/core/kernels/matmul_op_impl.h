@@ -417,7 +417,7 @@ struct LaunchBatchMatMul<CPUDevice, Scalar> {
                      const Tensor& in_y, bool adj_x, bool adj_y, bool trans_x,
                      bool trans_y,
                      const MatMulBCast& bcast, Tensor* out,
-                     int numeric_flags=0) {
+                     int range1, int range2) {
     typedef ParallelMatMulKernel<Scalar, Eigen::NumTraits<Scalar>::IsComplex>
         ParallelMatMulKernel;
     bool conjugate_result = false;
@@ -548,7 +548,7 @@ struct LaunchBatchMatMul<GPUDevice, Scalar> {
                      const Tensor& in_y, bool adj_x, bool adj_y, bool trans_x,
                      bool trans_y, 
                      const MatMulBCast& bcast, Tensor* out,
-                     int numeric_flags=0) {
+                     int range1, int range2) {
     se::blas::Transpose trans[] = {se::blas::Transpose::kNoTranspose,
                                    se::blas::Transpose::kTranspose,
                                    se::blas::Transpose::kConjugateTranspose};
@@ -626,7 +626,7 @@ struct LaunchBatchMatMul<GPUDevice, Scalar> {
             /*broadcast_a=*/bcast.x_batch_size() == 1,
             /*broadcast_b=*/bcast.y_batch_size() == 1,
             se::gpu::BlasLt::Epilogue::kDefault,
-            numeric_flags
+            range1, range2
           };
 
         std::optional<int> max_algorithm_count;
@@ -723,7 +723,7 @@ struct LaunchBatchMatMul<GPUDevice, Scalar> {
                     static_cast<Coefficient>(1.0), b_ptrs,
                     adj_y || trans_y ? k : n, a_ptrs, adj_x || trans_x ? m : k,
                     static_cast<Coefficient>(0.0), c_ptrs, n, batch_size,
-                    GetNumericOptions(numeric_flags), &scratch_allocator)
+                    GetNumericOptions(range1, range2), &scratch_allocator)
                 .ok();
         if (!blas_launch_status) {
           context->SetStatus(errors::Internal(
@@ -822,7 +822,7 @@ struct LaunchBatchMatMul<GPUDevice, Scalar> {
                            blas_transpose_b, blas_transpose_a, n, m, k,
                            *(b_ptrs[0]), adj_y || trans_y ? k : n, *(a_ptrs[0]),
                            adj_x || trans_x ? m : k, c_ptrs[0], n,
-                           GetNumericOptions(numeric_flags)));
+                           GetNumericOptions(range1, range2)));
       } else if (use_strided_batched) {
         OP_REQUIRES_OK(
             context, stream->ThenBlasGemmStridedBatched(
@@ -831,7 +831,7 @@ struct LaunchBatchMatMul<GPUDevice, Scalar> {
                          adj_y || trans_y ? k : n, b_stride, *a_ptrs[0],
                          adj_x || trans_x ? m : k, a_stride,
                          static_cast<Coefficient>(0.0), c_ptrs[0], n, c_stride,
-                         batch_size, GetNumericOptions(numeric_flags)));
+                         batch_size, GetNumericOptions(range1, range2)));
       } else {
         BlasScratchAllocator scratch_allocator(context);
         bool blas_launch_status =
@@ -841,7 +841,7 @@ struct LaunchBatchMatMul<GPUDevice, Scalar> {
                     static_cast<Coefficient>(1.0), b_ptrs,
                     adj_y || trans_y ? k : n, a_ptrs, adj_x || trans_x ? m : k,
                     static_cast<Coefficient>(0.0), c_ptrs, n, batch_size,
-                    GetNumericOptions(numeric_flags), &scratch_allocator)
+                    GetNumericOptions(range1, range2), &scratch_allocator)
                 .ok();
         if (!blas_launch_status) {
           context->SetStatus(errors::Internal(
@@ -903,7 +903,14 @@ class BaseBatchMatMulOp : public OpKernel {
       trans_x_ = false;
       trans_y_ = false;
     }
-    numeric_flags_ = context->GetNumericFlags(true);
+    if(is_legacy_matmul) {
+      context->GetAttr("grad_a", &range1_);
+      context->GetAttr("grad_b", &range2_);
+    } else {
+      context->GetAttr("grad_x", &range1_);
+      context->GetAttr("grad_y", &range2_);
+    }
+    printf("BaseBatchMatMulOp: ranges %d %d\n", range1_, range2_);
   }
 
   ~BaseBatchMatMulOp() override {}
@@ -997,7 +1004,7 @@ class BaseBatchMatMulOp : public OpKernel {
       LaunchBatchMatMul<Device, float>::Launch(
           ctx, in0_reshaped_float, in1_reshaped_float, adj_x_, adj_y_, trans_x_,
           trans_y_, bcast, &out_reshaped_float,
-          numeric_flags_);
+          range1_, range2_);
       FastConvertFromFloat<Tout>(out_reshaped_float.flat<float>().data(),
                                  out_reshaped.flat<Tout>().data(),
                                  out->NumElements());
@@ -1012,7 +1019,7 @@ class BaseBatchMatMulOp : public OpKernel {
       }
       LaunchBatchMatMul<Device, Tout>::Launch(
           ctx, in0_reshaped, in1_reshaped, adj_x_, adj_y_, trans_x_, trans_y_,
-          bcast, &out_reshaped, numeric_flags_);
+          bcast, &out_reshaped, range1_, range2_);
     }
   }
 
@@ -1026,7 +1033,7 @@ class BaseBatchMatMulOp : public OpKernel {
   bool adj_y_ = false;
   bool trans_x_ = false;
   bool trans_y_ = false;
-  int numeric_flags_ = 0;
+  int range1_ = -1, range2_ = -1;
 
   // Cast `t` from `SrcT` to `DstT`.
   template <typename SrcT, typename DstT>

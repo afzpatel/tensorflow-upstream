@@ -48,7 +48,7 @@ struct BlasLtMatmulPlanParams {
   bool broadcast_a = false;
   bool broadcast_b = false;
   se::gpu::BlasLt::Epilogue epilogue = se::gpu::BlasLt::Epilogue::kDefault;
-  int numeric_flags = 0;
+  int range1 = 0, range2 = 0;
 };
 
 struct PlanAndAlgorithms {

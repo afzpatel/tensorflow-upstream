@@ -45,7 +45,7 @@ absl::Duration RandomDuration() {
 
 }  // namespace
 
-/*static*/ tsl::StatusOr<GpuTimer> GpuTimer::Create(GpuStream* stream) {
+/*static*/ tsl::StatusOr<GpuTimer> GpuTimer::Create(GpuStream* stream, bool wall_time) {
   GpuExecutor* parent = stream->parent();
   GpuContext* context = parent->gpu_context();
   GpuEventHandle start_event;
@@ -58,7 +58,7 @@ absl::Duration RandomDuration() {
   TF_RETURN_IF_ERROR(GpuDriver::RecordEvent(parent->gpu_context(), start_event,
                                             stream->gpu_stream()));
   return tsl::StatusOr<GpuTimer>{absl::in_place, parent, start_event,
-                                 stop_event, stream};
+                                 stop_event, stream, wall_time};
 }
 
 /*static*/ tsl::StatusOr<std::optional<GpuTimer>> GpuTimer::CreateIfNeeded(
@@ -72,6 +72,19 @@ absl::Duration RandomDuration() {
 
 /*static*/ void GpuTimer::ReturnRandomDurationsForTesting() {
   return_random_durations = true;
+}
+
+GpuTimer::GpuTimer(GpuExecutor* parent, GpuEventHandle start_event,
+                    GpuEventHandle stop_event, GpuStream* stream,
+                    bool wall_time)
+      : parent_(parent),
+        start_event_(start_event),
+        stop_event_(stop_event),
+        stream_(stream), is_wall_time_(wall_time) {
+  if(wall_time) {
+    hipStreamSynchronize(stream->gpu_stream());
+    start_time_ = absl::Now();
+  }
 }
 
 GpuTimer::~GpuTimer() {
@@ -94,6 +107,12 @@ tsl::StatusOr<absl::Duration> GpuTimer::GetElapsedDuration() {
   if (is_stopped_) {
     return absl::InternalError("Measuring inactive timer");
   }
+  if(is_wall_time_) {
+    hipStreamSynchronize(stream_->gpu_stream());
+    is_stopped_ = true;
+    return absl::Now()-start_time_;
+  }
+
   TF_RETURN_IF_ERROR(GpuDriver::RecordEvent(parent_->gpu_context(), stop_event_,
                                             stream_->gpu_stream()));
   float elapsed_milliseconds = NAN;

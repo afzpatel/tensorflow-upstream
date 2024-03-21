@@ -43,30 +43,6 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-
-inline void GetXlaPrecisionConfigNumericFlags(const mlir::ArrayAttr& precision_config,
-  int& grad_flags, int64_t& compute_precision)
-{
-    compute_precision = 0;
-    grad_flags = 0;
-    int grad_count=0;
-    for (auto attr : precision_config) {
-      int64_t value = static_cast<int64_t>(
-          attr.template cast<mlir::mhlo::PrecisionAttr>().getValue());
-      if (value > compute_precision && value < PrecisionConfig::ACTIVATION) {
-        compute_precision = value;
-      }
-      if(value>=PrecisionConfig::ACTIVATION && value<=PrecisionConfig::GRADIENT)
-      {
-        if(grad_count<2 && value == PrecisionConfig::GRADIENT)
-          grad_flags |= 1 << grad_count;
-        grad_count++;
-      }
-    }
-    if(grad_count==2)
-      grad_flags |= 256;
-}
-
 // Ordered non-contracting dimensions for a dot instruction operand.
 
 StatusOr<std::vector<int64_t>> GetNonContractingDims(
@@ -131,7 +107,8 @@ struct GemmConfig : public se::gpu::GemmConfig {
       absl::Span<const int64_t> rhs_batch_dims,
       absl::Span<const int64_t> rhs_contracting_dims, const Shape& output_shape,
       double alpha_real, double alpha_imag, double beta,
-      std::optional<int64_t> algorithm, int64_t compute_precision, int grad_flags);
+      std::optional<int64_t> algorithm, int64_t compute_precision, 
+      const int* dynamic_ranges);
 
   // As above with additional `c_shape` and `bias_shape_ptr` parameter, both
   // which are only necessarily for F8 gemms.
@@ -142,7 +119,7 @@ struct GemmConfig : public se::gpu::GemmConfig {
       absl::Span<const int64_t> rhs_contracting_dims, const Shape& c_shape,
       const Shape* bias_shape_ptr, const Shape& output_shape, double alpha_real,
       double alpha_imag, double beta, std::optional<int64_t> algorithm,
-      int64_t compute_precision, int grad_flags);
+      int64_t compute_precision, const int* dynamic_ranges);
 
   template <typename CublasLtMatmulMaybeF8Op,
             typename = std::enable_if<
@@ -153,10 +130,23 @@ struct GemmConfig : public se::gpu::GemmConfig {
   static StatusOr<GemmConfig> For(CublasLtMatmulMaybeF8Op op) {
     mlir::mhlo::DotDimensionNumbersAttr dot_dims = op.getDotDimensionNumbers();
 
-    int64_t compute_precision = 0;  // Default
-    int grad_flags = 0;
-    if (op.getPrecisionConfig().has_value())
-      GetXlaPrecisionConfigNumericFlags(*op.getPrecisionConfig(), grad_flags, compute_precision);
+  int64_t compute_precision = 0;  // Default
+
+  int dynamic_ranges[2]={-1,-1};
+  if (op.getPrecisionConfig().has_value()) {
+    auto cfg = *op.getPrecisionConfig();
+    CHECK(cfg.size() >= 2);
+    for(int i=0; i<2; i++)
+      dynamic_ranges[i] = static_cast<int>(cfg[i].template cast<mlir::mhlo::PrecisionAttr>().getValue());
+
+    for (auto attr : cfg) {
+      int64_t value = static_cast<int64_t>(
+        attr.template cast<mlir::mhlo::PrecisionAttr>().getValue());
+      if (value > compute_precision && value <= PrecisionConfig::HIGHEST) {
+        compute_precision = value;
+      }
+    }
+  }
 
     Shape bias_shape;
     if (op.getBias() != nullptr) {
@@ -170,10 +160,10 @@ struct GemmConfig : public se::gpu::GemmConfig {
         op.getBias() == nullptr ? nullptr : &bias_shape, GetShape(op.getD()),
         op.getAlphaReal().convertToDouble(),
         op.getAlphaImag().convertToDouble(), op.getBeta().convertToDouble(),
-        op.getAlgorithm(), compute_precision, grad_flags);
+        op.getAlgorithm(), compute_precision, dynamic_ranges);
   }
 
-  int grad_flags;
+  int ranges[2];
 };
 
 // Run the given GEMM instruction `gemm` subject to the configuration

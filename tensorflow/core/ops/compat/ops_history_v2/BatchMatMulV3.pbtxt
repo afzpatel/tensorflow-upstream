@@ -249,16 +249,16 @@ op {
   }
   attr {
     name: "grad_x"
-    type: "bool"
+    type: "int"
     default_value {
-      b: false
+      b: -1
     }
   }
   attr {
     name: "grad_y"
-    type: "bool"
+    type: "int"
     default_value {
-      b: false
+      b: -1
     }
   }
 }

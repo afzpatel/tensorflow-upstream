@@ -41,16 +41,22 @@ class BlasLt : public gpu::BlasLt {
 
  public:
   struct MatrixLayout {
-    static tsl::StatusOr<MatrixLayout> Create(const gpu::MatrixLayout& m);
+    static tsl::StatusOr<MatrixLayout> Create(const gpu::MatrixLayout& m, 
+      int dynamic_range=-1, bool f8_on = false);
 
     hipDataType type() const { return datatype_; }
     hipblasLtMatrixLayout_t get() const { return handle_.get(); }
+    uint64_t rows() const { return m_.num_rows; }
+    uint64_t cols() const { return m_.num_cols; }
+    uint64_t batch() const { return m_.batch_size; }
 
    private:
-    MatrixLayout(hipblasLtMatrixLayout_t handle, hipDataType datatype)
-        : handle_(handle, wrap::hipblasLtMatrixLayoutDestroy),
+    MatrixLayout(const gpu::MatrixLayout& m, 
+                 hipblasLtMatrixLayout_t handle, hipDataType datatype)
+        : m_(m), handle_(handle, wrap::hipblasLtMatrixLayoutDestroy),
           datatype_(datatype) {}
 
+    gpu::MatrixLayout m_;
     Owned<hipblasLtMatrixLayout_t> handle_;
     hipDataType datatype_;
   };
@@ -70,24 +76,31 @@ class BlasLt : public gpu::BlasLt {
       return HIPBLAS_POINTER_MODE_HOST;
     }
     hipblasLtMatmulDesc_t get() const { return handle_.get(); }
-
+    blas::Transpose get_trans_a() const { return trans_a_; }
+    blas::Transpose get_trans_b() const { return trans_b_; }
+    hipblasLtEpilogue_t epi() const { return epi_; }
    private:
     MatmulDesc(hipblasLtMatmulDesc_t handle, hipblasComputeType_t compute_type,
-               hipDataType datatype)
+               hipDataType datatype,
+               blas::Transpose trans_a, blas::Transpose trans_b)
         : handle_(handle, wrap::hipblasLtMatmulDescDestroy),
           compute_type_(compute_type),
-          datatype_(datatype) {}
+          datatype_(datatype), trans_a_(trans_a), trans_b_(trans_b) {}
 
     Owned<hipblasLtMatmulDesc_t> handle_;
     hipblasComputeType_t compute_type_;
     hipDataType datatype_;
+    blas::Transpose trans_a_, trans_b_;
+    hipblasLtEpilogue_t epi_;
   };
 
   struct MatmulPlan : public gpu::BlasLt::MatmulPlan {
     MatmulPlan(const BlasLt& blas_lt_ref, MatmulDesc&& op_desc,
                MatrixLayout&& a_desc, MatrixLayout&& b_desc,
                MatrixLayout&& c_desc, MatrixLayout&& d_desc,
-               xla::complex128 alpha, double beta, bool must_swap_operands)
+               xla::complex128 alpha, double beta, bool must_swap_operands,
+               const int* range, 
+               bool f8, bool f8_emu, bool f8_sr, bool f8_dynamic_scale, int f8_emu_param)
         : blas_lt_ref_(blas_lt_ref),
           op_desc_(std::move(op_desc)),
           a_desc_(std::move(a_desc)),
@@ -96,7 +109,9 @@ class BlasLt : public gpu::BlasLt {
           d_desc_(std::move(d_desc)),
           alpha_(alpha),
           beta_(beta),
-          must_swap_operands_(must_swap_operands) {}
+          must_swap_operands_(must_swap_operands),
+          range1_(range[0]), range2_(range[1]), f8_(f8),
+          f8_emu_(f8_emu), f8_sr_(f8_sr), f8_dynamic_scale_(f8_dynamic_scale), f8_emu_param_(f8_emu_param) {}
 
     ~MatmulPlan() override = default;
 
@@ -131,7 +146,7 @@ class BlasLt : public gpu::BlasLt {
                          DeviceMemoryBase d_amax,
                          blas::ProfileResult* profile_result) const override;
 
-   private:
+  public:
     const BlasLt& blas_lt_ref_;
     // TODO(cjfj): Add consistency checks for types, shapes, etc.?
     MatmulDesc op_desc_;
@@ -142,6 +157,11 @@ class BlasLt : public gpu::BlasLt {
     xla::complex128 alpha_;
     double beta_;
     bool must_swap_operands_;
+    int range1_, range2_;
+    bool f8_, f8_emu_, f8_sr_, f8_dynamic_scale_;
+    int f8_emu_param_;
+    mutable std::map<std::pair<size_t, size_t>, std::vector<MatmulAlgorithm> > algos_;
+    mutable std::vector<MatmulAlgorithm> last_algos_;
   };  // class MatmulPlan
 
   explicit BlasLt(gpu::GpuExecutor* parent)
@@ -154,7 +174,13 @@ class BlasLt : public gpu::BlasLt {
 
   ~BlasLt() override = default;
 
- private:
+protected:
+  uint8_t* f8_staging_buffer_ = nullptr;
+  uint64_t f8_staging_buffer_size_ = 512000000;
+
+  absl::Mutex f8_mu_;
+  hipEvent_t f8_staging_event_;
+private:
   gpu::GpuExecutor* parent_;
   mutable absl::Mutex mu_;
   Owned<hipblasLtHandle_t> blas_lt_ ABSL_GUARDED_BY(mu_);

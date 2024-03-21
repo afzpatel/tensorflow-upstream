@@ -43,6 +43,7 @@ limitations under the License.
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/stream_executor/blas.h"
 #include "xla/xla.pb.h"
+#include "tsl/util/env_var.h"
 
 namespace xla {
 namespace gpu {
@@ -468,6 +469,11 @@ static LogicalResult Outline(unsigned ordinal,
 //===----------------------------------------------------------------------===//
 
 void OutlineGpuGraphsPass::runOnOperation() {
+  int64_t do_stats = 0;
+  tsl::Status status = tsl::ReadInt64FromEnvVar("GEMM_STATS", 0, &do_stats);
+  if(do_stats != 0)
+    return;
+
   SymbolTable sym_table(getOperation());
   CustomCallDeclarations custom_calls(std::move(sym_table));
 

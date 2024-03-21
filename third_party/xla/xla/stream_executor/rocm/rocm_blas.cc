@@ -50,8 +50,11 @@ namespace gpu {
 
 //PLUGIN_REGISTRY_DEFINE_PLUGIN_ID(kRocBlasPlugin);
 
-void rocm_castHalf2F8(void* stream, uint8_t* dst, const __half* src, uint64_t size, int fp8);
-void rocm_castF82Half(void* stream, __half* dst, const uint8_t* src, uint64_t size, int fp8);
+void rocm_castHalf2F8(void* stream, uint8_t* dst, const __half* src, uint64_t size, int fp8, float mult, bool sr);
+void rocm_castF82Half(void* stream, __half* dst, const uint8_t* src, uint64_t size, int fp8, float mult);
+void rocm_randomize(void* stream, __half* dst, const __half* src, uint64_t size, int param);
+float variance_gpu(void* stream, const __half* p, int n, float*, float*);
+float variance2_gpu(const __half* p1, const __half* p2, int n, float* maxval, float* mean, int* maxidx);
 
 std::map<std::string, uint64_t> flop_lookup;
 std::map<std::string, std::vector<double> > timing_database;
@@ -90,6 +93,10 @@ T filtered_mean(std::vector<T> v, int& excluded)
     for(int i=(v.size()>2 ? 1 : 0); i<int(v.size()>2 ? v.size()-1 : v.size()); i++)
       stdev += (v[i]-mean)*(v[i]-mean);
     stdev = sqrt(stdev/T(v.size() - (v.size()>2 ? 2 : 0)));
+    if(stdev == 0.0) {
+      excluded = 0;
+      return mean;
+    }
 
     int mean_count = 0;
     for(auto x: v)
@@ -144,6 +151,74 @@ void update_db(std::string key, uint64_t flops, double ms)
     fflush(stdout);
   }
   timing_mutex.unlock(); 
+}
+
+void maybe_start_timer(std::optional<GpuTimer>& timer, Stream *stream)
+{
+  int64_t do_stats = 0;
+  tsl::Status status = tsl::ReadInt64FromEnvVar("GEMM_STATS", 0, &do_stats);
+  if(do_stats) {
+    hipStreamCaptureStatus captureStatus;
+    hipError_t err = hipStreamIsCapturing(AsGpuStreamValue(stream), &captureStatus);
+    if(err == hipSuccess && captureStatus == hipStreamCaptureStatusNone) {
+      auto timer_or_status = gpu::GpuTimer::Create(AsGpuStream(stream), do_stats==2);
+      if (!timer_or_status.ok()) {
+        LOG(ERROR) << "Failed to create timer";
+        return;
+      }
+      timer.emplace(std::move(*timer_or_status));
+    } else {
+      update_db("CapturedGEMM", 1, 1.0);
+    }
+  }
+}
+
+void maybe_stop_timer(std::optional<GpuTimer>& timer, 
+              std::string report_string, uint64_t flops)
+{
+    // At time intervals we're working with (often <200 microseconds), synchronization
+    // can have observable negative impact on overall timing.
+    if(timer) {
+      tsl::StatusOr<absl::Duration> elapsed = timer->GetElapsedDuration();
+      if(elapsed.ok()) {
+        double t = absl::ToDoubleMilliseconds(*elapsed);
+        update_db(report_string, flops, t);
+      }
+    }
+}
+
+void dynamic_scale(hipStream_t stream, bool on, int& range1, int& range2,
+  const __half* pA, const __half* pB, int nA, int nB,
+  float& mult_a, float& mult_b, int parameter)
+{
+    if(on) {
+      float max_va=0, max_vb=0, std_va=0, std_vb=0;
+      float mean_a=0, mean_b=0;
+      //hipDeviceSynchronize();
+      if (range1 != NumericOptions::E5) {
+        std_va = variance_gpu(stream, pA, nA, &max_va, &mean_a);
+        mult_a = std::max<float>(1.0f, std::min<float>(pow(2.0, parameter), std::min<float>(std::max<float>(1.0f, 120.0f/max_va), 16.0f / std_va)));
+        //mult_a = std::min<float>(std::max<float>(1.0f, 120.0f/max_va), 16.0f / std_va);
+        mult_a = pow(2.0, round(log(mult_a)/log(2.0))); 
+        range1 = int(log(mult_a)/log(2.0)+5);
+        //std::vector<Eigen::half> v;
+        //hipDeviceSynchronize();
+        //fetch(v, pA, nA, stream);
+      }
+      if(range2 != NumericOptions::E5) {
+        std_vb = variance_gpu(stream, pB, nB, &max_vb, &mean_b);
+        mult_b = std::max<float>(1.0f, std::min<float>(pow(2.0, parameter), std::min<float>(std::max<float>(1.0f, 120.0f/max_vb), 16.0f / std_vb)));
+        //mult_b = std::min<float>(std::max<float>(1.0f, 120.0f/max_vb), 16.0f / std_vb);
+        mult_b = pow(2.0, round(log(mult_b)/log(2.0))); 
+        range2 = int(log(mult_b)/log(2.0)+5);
+      }
+      //printf("%.3f %.3f  %.3f %.3f  %.3f %.3f\n", mean_a, mean_b, std_va, std_vb, max_va, max_vb);
+    } else {
+      //mult_a = (range1 != NumericOptions::E5) ? pow(4.0, range1-5) : 1.0;
+      //mult_b = (range2 != NumericOptions::E5) ? pow(4.0, range2-5) : 1.0;
+      mult_a = 1.0;
+      mult_b = 1.0;
+    }
 }
 
 extern void rocm_Broadcast_fp32(void *stream, float *dst, int dst_stride,
@@ -247,6 +322,9 @@ bool ROCMBlas::Init() {
       use_hgemm_alt_impl_ = true;
   }
 
+  hipMalloc((void**)&f8_staging_buffer_, f8_staging_buffer_size_);
+  hipEventCreate(&f8_staging_event_);
+
   return true;
 }
 
@@ -265,6 +343,8 @@ ROCMBlas::~ROCMBlas() {
     gpu::ScopedActivateExecutorContext sac{parent_};
     wrap::rocblas_destroy_handle(blas_);
   }
+  hipFree(f8_staging_buffer_);
+  hipEventDestroy(f8_staging_event_);
 }
 
 bool ROCMBlas::SetStream(Stream *stream) {
@@ -537,7 +617,7 @@ bool ROCMBlas::DoBlasGemv(Stream *stream, blas::Transpose trans, uint64_t m,
 }
 
 bool ROCMBlas::DoBlasSbmv(Stream *stream, blas::UpperLower uplo, uint64_t n,
-                          uint64_t k, float alpha, const DeviceMemory<float> &a,
+                            uint64_t k, float alpha, const DeviceMemory<float> &a,
                           int lda, const DeviceMemory<float> &x, int incx,
                           float beta, DeviceMemory<float> *y, int incy) {
   return DoBlasInternal(
@@ -557,38 +637,6 @@ bool ROCMBlas::DoBlasSbmv(Stream *stream, blas::UpperLower uplo, uint64_t n,
       incx, &beta, GpuMemoryMutable(y), incy);
 }
 
-static void maybe_start_timer(std::optional<GpuTimer>& timer, Stream *stream)
-{
-  int64_t do_stats = 0;
-  tsl::Status status = tsl::ReadInt64FromEnvVar("GEMM_STATS", 0, &do_stats);
-  if(do_stats) {
-    hipStreamCaptureStatus captureStatus;
-    hipError_t err = hipStreamIsCapturing(AsGpuStreamValue(stream), &captureStatus);
-    if(err == hipSuccess && captureStatus == hipStreamCaptureStatusNone) {
-      auto timer_or_status = gpu::GpuTimer::Create(AsGpuStream(stream));
-      if (!timer_or_status.ok()) {
-        LOG(ERROR) << "Failed to create timer";
-        return;
-      }
-      timer.emplace(std::move(*timer_or_status));
-    }
-  }
-}
-
-static void maybe_stop_timer(std::optional<GpuTimer>& timer, 
-              std::string report_string, uint64_t flops)
-{
-    // At time intervals we're working with (often <200 microseconds), synchronization
-    // can have observable negative impact on overall timing.
-    if(timer) {
-      tsl::StatusOr<absl::Duration> elapsed = timer->GetElapsedDuration();
-      if(elapsed.ok()) {
-        double t = absl::ToDoubleMilliseconds(*elapsed);
-        update_db(report_string, flops, t);
-      }
-    }
-}
-
 int fetch(std::vector<Eigen::half>& v, const Eigen::half* p, int n, hipStream_t stream)
 {
   v.resize(n);
@@ -601,11 +649,14 @@ int fetch(std::vector<Eigen::half>& v, const Eigen::half* p, int n, hipStream_t 
   return ninf;
 }
 
-void eval_differences(const std::vector<Eigen::half>& va, const std::vector<Eigen::half>& vb, double& mean, double& maxval)
+// This function is used to compare the results of a half precision GEMM
+void eval_differences(const std::vector<Eigen::half>& va, const std::vector<Eigen::half>& vb, double& mean, double& maxval, int& max_index)
 {
   double sum=0;
   maxval=0;
   int count=0;
+  max_index = 0; 
+  double sumsq = 0;
   for(int i=0; i<va.size(); i++)
   {
     if(!isfinite(float(va[i])) || !isfinite(float(vb[i])))
@@ -613,16 +664,57 @@ void eval_differences(const std::vector<Eigen::half>& va, const std::vector<Eige
     count++;
     double d = fabs(float(va[i])-float(vb[i]));
     sum+=d;
-    maxval=std::max(maxval,d);
+    if(d>maxval)
+    {
+      maxval=d;
+      max_index=i;
+    }
+    sumsq += float(va[i])*float(va[i]);
   }
   if(count==0)
     count=1;
   mean = sum/count;
+  sumsq = sqrt(sumsq/count);
+  mean /= sumsq;
 }
 
+// Generate average of an array
+template <typename T>
+T average(const std::vector<T>& v)
+{
+  T sum = 0;
+  for(auto x: v)
+    sum += x;
+  return sum/v.size();
+}
+
+static void read_f8_env_flags(/*const NumericOptions& numeric_options,*/ bool& f8_on, bool& f8_emu, bool& f8_sr, bool& f8_dynamic_scale, bool has_f8_, int& f8_emu_param)
+{
+  f8_on = true; //!(numeric_options.grad_flags & 4);
+  int64_t f8_env = 0, f8_mm_env = 0, f8_emu_int = 0;
+  tsl::Status status;
+  status = tsl::ReadInt64FromEnvVar("TF_ROCM_F8", 0, &f8_env);
+  status = tsl::ReadInt64FromEnvVar("F8_MM", 0, &f8_mm_env);
+  status = tsl::ReadInt64FromEnvVar("F8_EMU", 0, &f8_emu_int);
+  f8_sr = (f8_mm_env & 2);
+  f8_dynamic_scale = (f8_mm_env & 4);
+  f8_emu = (f8_emu_int & 1);
+  if(f8_env == 0 || (f8_mm_env & 1) == 0)
+    f8_on = false;
+  if(!f8_on)
+    f8_emu = false;
+  if(f8_on && !has_f8_)
+    f8_emu = true;
+  f8_emu_param = f8_emu_int >> 1;
+}
+
+/*
 static void read_f8_env_flags(const NumericOptions& numeric_options, bool& f8_on, bool& f8_emu, bool has_f8_)
 {
-  f8_on = !(numeric_options.grad_flags & 4);
+  //f8_on = !(numeric_options.grad_flags & 4);
+  f8_on = (numeric_options.range1 != NumericOptions::HIGHEST
+    && numeric_options.range2 != NumericOptions::HIGHEST);
+
   int64_t f8_env = 0, f8_mm_env = 0, f8_emu_int = 0;
   tsl::Status status;
   status = tsl::ReadInt64FromEnvVar("TF_ROCM_F8", 0, &f8_env);
@@ -634,7 +726,7 @@ static void read_f8_env_flags(const NumericOptions& numeric_options, bool& f8_on
   if(f8_on && !has_f8_)
     f8_emu = true;
 }
-
+*/
 /**
  * 
  *  ALPHA/BETA TYPES
@@ -648,7 +740,6 @@ static void read_f8_env_flags(const NumericOptions& numeric_options, bool& f8_on
  *    We wrap all ex calls into objects that do the casting.
  * 
 **/
-
 tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
                                  blas::Transpose transb, uint64_t m, uint64 n,
                                  uint64_t k, blas::DataType dtype,
@@ -687,7 +778,8 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
       }
     }
   }
-  if(!(numeric_options.grad_flags & NumericOptions::GF_Initialized)) {
+  if(numeric_options.range1 == NumericOptions::UNDEFINED
+    || numeric_options.range2 == NumericOptions::UNDEFINED) {
     printf("ERROR: DoBlasGemm with uninitialized gradient flags\n");
     exit(-1);
   }
@@ -701,13 +793,26 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
     prefix="BF16";
   else if(dtype==blas::DataType::kFloat)
     prefix="F32";
-  std::string report_string = " matmul M " + std::to_string(m)
-    + " N " + std::to_string(n) + " K " + std::to_string(k) + " "
+    //k = (op_desc_.get_trans_a() == blas::Transpose::kNoTranspose) ? a_desc_.cols() : a_desc_.rows();
+    //m = (op_desc_.get_trans_a() == blas::Transpose::kNoTranspose) ? a_desc_.rows() : a_desc_.cols();
+    //n = (op_desc_.get_trans_b() == blas::Transpose::kNoTranspose) ? b_desc_.cols() : b_desc_.rows();
+
+  int64_t arows = (transa == blas::Transpose::kNoTranspose) ? m : k;
+  int64_t acols = (transa == blas::Transpose::kNoTranspose) ? k : m;
+  int64_t brows = (transb == blas::Transpose::kNoTranspose) ? k : n;
+  int64_t bcols = (transb == blas::Transpose::kNoTranspose) ? n : k;
+  std::string report_string = "matmul_batch1(" 
+    + std::to_string(arows) + "," + std::to_string(acols) + ")x"
+    + "(" + std::to_string(brows) + "," + std::to_string(bcols) + ")"
+//  std::string report_string = " matmul_" + std::to_string(m)
+//    + "x" + std::to_string(n) + "x" + std::to_string(k) + " "
     + ((transa == blas::Transpose::kNoTranspose) ? "N" : "T")
-    + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T");
+    + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T")
+    +"_" + prefix;
 
   uint32_t gemm_ex_flags = rocblas_gemm_flags_none;
-  bool is_backprop = (numeric_options.grad_flags & 3);
+  bool is_backprop = (numeric_options.range1 == NumericOptions::E5
+    || numeric_options.range2 == NumericOptions::E5);
   if (is_backprop && use_hgemm_alt_impl_)
     gemm_ex_flags = rocblas_gemm_flags_fp16_alt_impl;
 
@@ -754,59 +859,155 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
 
 #if ROCBLAS_VERSION_MAJOR>3 || (ROCBLAS_VERSION_MAJOR==3 && ROCBLAS_VERSION_MINOR>=1)
   if(dtype==blas::DataType::kHalf) {
-    if(!(numeric_options.grad_flags & 256) ) {
-      printf("DoBlasGemm: no F8 flags!\n");
-      exit(0);
-    }
-
     std::unique_ptr<TemporaryDeviceMemory<uint8_t> > temp_mem;
-    DeviceMemory<uint8_t> device_memory;
-    bool f8_on, f8_emu;
-    read_f8_env_flags(numeric_options, f8_on, f8_emu, has_f8_);
+    std::unique_ptr<TemporaryDeviceMemory<uint8_t> > temp_mem2;
+    bool f8_on = false, f8_emu=false, f8_sr=false, f8_dynamic_scale=false;
+    int f8_emu_param=0;
+    if(numeric_options.range1 != NumericOptions::HIGHEST && numeric_options.range2 != NumericOptions::HIGHEST)
+      read_f8_env_flags(f8_on, f8_emu, f8_sr, f8_dynamic_scale, has_f8_, f8_emu_param);
+
+    bool a_fp8 = (numeric_options.range1 != NumericOptions::E5);
+    bool b_fp8 = (numeric_options.range2 != NumericOptions::E5);
+    if(a_fp8 && b_fp8)
+      f8_sr = false;
+
     rocblas_computetype compute_type;
 
     if(f8_on) {
-      report_string += " f8_flags " + std::to_string(numeric_options.grad_flags);
+      //if(a.size() != m*k*2 || b.size() != n*k*2)
+      //  printf("ERROR: m %d n %d k %d, expect sizes %d %d, found %d %d\n", m, n, k, m*k*2, n*k*2, a.size(), b.size());
+      report_string += "_F8";
       if(f8_emu)
-        report_string += " emulated ";
+        report_string += "Emu";
+      if(f8_sr)
+        report_string += "_SR";
+      float mult_a=1.0, mult_b=1.0;
+      int range1 = numeric_options.range1, range2 = numeric_options.range2;
+      dynamic_scale(AsGpuStreamValue(stream), f8_dynamic_scale, range1, range2,
+        (const __half*) a.opaque(), (const __half*) b.opaque(), m*k, n*k, mult_a, mult_b, f8_emu_param);
 
-      switch (numeric_options.grad_flags & 3) {
-        case 0:
-          compute_type = rocblas_compute_type_f8_f8_f32;
-          break;
-        case 1:
-          compute_type = rocblas_compute_type_bf8_f8_f32;
-          break;
-        case 2:
-          compute_type = rocblas_compute_type_f8_bf8_f32;
-          break;
-        case 3:
-          return tsl::errors::Internal(absl::StrCat("Unexpected grad_flags for GEMM: ",
-                                            numeric_options.grad_flags & 3));
+/*      
+      if(f8_dynamic_scale) {
+        float max_va, max_vb;
+        if (a_fp8) {
+          float std_va = variance_gpu((const __half*) a.opaque(), m*k, &max_va);
+          mult_a = std::min<float>(128.0f, 16.0f / std_va);
+          mult_a = std::min<float>(mult_a, std::max<float>(1.0f, 120.0f/max_va));
+          mult_a = pow(2.0, round(log(mult_a)/log(2.0))); 
+          range1 = int(log(mult_a)/log(2.0)+5);
+        }
+        if(b_fp8) {
+          float std_vb = variance_gpu((const __half*) b.opaque(), n*k, &max_vb);
+          mult_b = std::min<float>(128.0f, 16.0f / std_vb);
+          mult_b = std::min<float>(mult_b, std::max<float>(1.0f, 120.0f/max_vb));
+          mult_b = pow(2.0, round(log(mult_b)/log(2.0))); 
+          range2 = int(log(mult_b)/log(2.0)+5);
+        }
+      } else {
+        mult_a = a_fp8 ? pow(4.0, range1-5) : 1.0;
+        mult_b = b_fp8 ? pow(4.0, range2-5) : 1.0;
       }
-      report_string = "F8" + report_string + " " + std::to_string(numeric_options.grad_flags & 3);
+*/
+      report_string += "_" + std::to_string(range1) + "_" + std::to_string(range2);
 
       uint8_t *temp_a, *temp_b;
 
-      TF_ASSIGN_OR_RETURN(temp_mem, 
-        stream->AllocateTemporaryArray<uint8_t>(m*k+n*k));
-      device_memory = DeviceMemory<uint8_t>(*(temp_mem->mutable_device_memory()));
+      absl::MutexLock lock{&f8_mu_};
 
-      temp_a = (uint8_t*)device_memory.opaque();
+      if(m*k+n*k>f8_staging_buffer_size_) {
+        maybe_start_timer(timer, stream);
+        TF_ASSIGN_OR_RETURN(temp_mem, 
+          stream->AllocateTemporaryArray<uint8_t>(m*k+n*k));
+        DeviceMemory<uint8_t> device_memory;
+        device_memory = DeviceMemory<uint8_t>(*(temp_mem->mutable_device_memory()));
+        temp_a = (uint8_t*)device_memory.opaque();
+      } else {
+        //hipStreamWaitEvent(AsGpuStreamValue(stream), f8_staging_event_);
+        hipEventSynchronize(f8_staging_event_);
+        maybe_start_timer(timer, stream);
+        temp_a = f8_staging_buffer_;
+      }
       temp_b = temp_a+m*k;
-      bool a_fp8 = (numeric_options.grad_flags & 3) != 1;
-      bool b_fp8 = (numeric_options.grad_flags & 3) != 2;
-
-      rocm_castHalf2F8(AsGpuStreamValue(stream), temp_a, (const __half*)a.opaque(), m*k, a_fp8 ? 1 : 0);
-      rocm_castHalf2F8(AsGpuStreamValue(stream), temp_b, (const __half*)b.opaque(), n*k, b_fp8 ? 1 : 0);
-      //hipStreamSynchronize(AsGpuStreamValue(stream));
-
-      maybe_start_timer(timer, stream);
       tsl::Status retval;
+
+      hipStreamSynchronize(AsGpuStreamValue(stream));
+      float alpha_eff = *(const float*)alpha;
+      float alpha_orig = alpha_eff;
+      alpha_eff *= 1./(mult_a*mult_b);
+      alpha = &alpha_eff;
+
+      rocm_castHalf2F8(AsGpuStreamValue(stream), temp_a, (const __half*)a.opaque(), m*k, a_fp8 ? 1 : 0, mult_a, f8_sr);
+      rocm_castHalf2F8(AsGpuStreamValue(stream), temp_b, (const __half*)b.opaque(), n*k, b_fp8 ? 1 : 0, mult_b, f8_sr);
+
+      std::vector<Eigen::half> vb_input;
+      if(gemm_numerics) {
+        hipStreamSynchronize(AsGpuStreamValue(stream));
+        int binf_input = fetch(vb_input, (const Eigen::half*)b.opaque(), n*k, AsGpuStreamValue(stream));
+      }
+
       if(f8_emu) {
-        rocm_castF82Half(AsGpuStreamValue(stream), (__half*)a.opaque(), temp_a, m*k, a_fp8 ? 1 : 0);
-        rocm_castF82Half(AsGpuStreamValue(stream), (__half*)b.opaque(), temp_b, n*k, b_fp8 ? 1 : 0);
-        retval = call_gemm_ex(rocblas_datatype_f16_r);
+        TF_ASSIGN_OR_RETURN(temp_mem2, 
+          stream->AllocateTemporaryArray<uint8_t>((m*k+n*k)*4));
+        DeviceMemory<uint8_t> device_memory;
+        device_memory = DeviceMemory<uint8_t>(*(temp_mem2->mutable_device_memory()));
+        uint8_t *temp_a2, *temp_b2, *temp_a3, *temp_b3;
+        temp_a2 = (uint8_t*)device_memory.opaque();
+        temp_b2 = temp_a2+m*k*2;
+        temp_a3 = temp_b2+n*k*2;
+        temp_b3 = temp_a3+m*k*2;
+
+        //std::vector<Eigen::half> va8, vb8, va8emu, vb8emu, va16, vb16;
+        //fetch(va16, (const Eigen::half*)a.opaque(), m*k, AsGpuStreamValue(stream));
+        //fetch(vb16, (const Eigen::half*)b.opaque(), n*k, AsGpuStreamValue(stream));
+
+        rocm_castF82Half(AsGpuStreamValue(stream), (__half*)temp_a2, temp_a, m*k, a_fp8 ? 1 : 0, 1.0f);//, 1./mult_a);
+        rocm_castF82Half(AsGpuStreamValue(stream), (__half*)temp_b2, temp_b, n*k, b_fp8 ? 1 : 0, 1.0f);//, 1./mult_b);
+
+        //fetch(va8, (const Eigen::half*)temp_a2, m*k, AsGpuStreamValue(stream));
+        //fetch(vb8, (const Eigen::half*)temp_b2, n*k, AsGpuStreamValue(stream));
+
+        //rocm_randomize(AsGpuStreamValue(stream), (__half*)temp_a2, (const __half*)a.opaque(), m*k, f8_emu_param);
+        //rocm_randomize(AsGpuStreamValue(stream), (__half*)temp_b2, (const __half*)b.opaque(), n*k, f8_emu_param);
+        /*
+        //fetch(va8emu, (const Eigen::half*)temp_a2, m*k, AsGpuStreamValue(stream));
+        //fetch(vb8emu, (const Eigen::half*)temp_b2, n*k, AsGpuStreamValue(stream));
+
+        float maxval, mean;
+        int max_index;
+        const __half* p1 = (const __half*)temp_a2;
+        const __half* p2 = (const __half*)temp_a3;
+        float stdev = variance2_gpu(p1, p2, m*k, &maxval, &mean, &max_index);
+        printf("A f8 vs emulated: stdev %.3f mean %.3f maxval %.3f max_index %d/%d, %.3f vs %.3f\n", stdev, mean, maxval, max_index, m*k, float(p1[max_index]), float(p2[max_index]));
+
+        p1 = (const __half*)temp_b2;
+        p2 = (const __half*)temp_b3;
+        stdev = variance2_gpu(p1, p2, n*k, &maxval, &mean, &max_index);
+        printf("B f8 vs emulated: stdev %.3f mean %.3f maxval %.3f max_index %d/%d, %.3f vs %.3f\n", stdev, mean, maxval, max_index, n*k, float(p1[max_index]), float(p2[max_index]));
+        */
+/*
+        double mean, maxval;
+        int max_index;
+        eval_differences(va8, va8emu, mean, maxval, max_index);
+        printf("A f8 vs emulated: mean %f maxval %f max_index %d, %.3f vs %.3f\n", mean, maxval, max_index, float(va8[max_index]), float(va8emu[max_index]));
+        eval_differences(va8, va16, mean, maxval, max_index);
+        printf("A f8 vs f16: mean %f maxval %f max_index %d, %.3f vs %.3f\n", mean, maxval, max_index, float(va8[max_index]), float(va16[max_index]));
+        eval_differences(va8emu, va16, mean, maxval, max_index);
+        printf("A f8emu vs f16: mean %f maxval %f max_index %d, %.3f vs %.3f\n", mean, maxval, max_index, float(va8emu[max_index]), float(va16[max_index]));
+        eval_differences(vb8, vb8emu, mean, maxval, max_index);
+        printf("B f8 vs emulated: mean %f maxval %f max_index %d, %.3f vs %.3f\n", mean, maxval, max_index, float(vb8[max_index]), float(vb8emu[max_index]));
+        eval_differences(vb8, vb16, mean, maxval, max_index);
+        printf("B f8 vs f16: mean %f maxval %f max_index %d, %.3f vs %.3f\n", mean, maxval, max_index, float(vb8[max_index]), float(vb16[max_index]));
+        eval_differences(vb8emu, vb16, mean, maxval, max_index);
+        printf("B f8emu vs f16: mean %f maxval %f max_index %d, %.3f vs %.3f\n", mean, maxval, max_index, float(vb8emu[max_index]), float(vb16[max_index]));
+*/
+        
+
+//        rocm_randomize(AsGpuStreamValue(stream), (__half*)temp_a2, (const __half*)a.opaque(), m*k, f8_emu_param);
+//        rocm_randomize(AsGpuStreamValue(stream), (__half*)temp_b2, (const __half*)b.opaque(), n*k, f8_emu_param);
+
+        //alpha = &alpha_orig;
+        retval = call_gemm_ex(rocblas_datatype_f16_r, (void*)temp_a2, (void*)temp_b2);
+        hipStreamSynchronize(AsGpuStreamValue(stream));
       }
       else {
         retval = DoBlasInternalStatus(
@@ -818,82 +1019,21 @@ tsl::Status ROCMBlas::DoBlasGemm(Stream *stream, blas::Transpose transa,
             beta, 
             c->opaque(), rocblas_datatype_f16_r, ldc,
             c->opaque(), rocblas_datatype_f16_r, ldc,
-            compute_type,
+            rocblas_compute_type_f32,
             rocblas_gemm_algo_standard, 0, 0);
       }
-  #if 0
-        if(gemm_numerics)
-        {
-          hipStreamSynchronize(AsGpuStreamValue(stream));
-          int ainf = fetch(va, (const Eigen::half*)a.opaque(), m*k, AsGpuStreamValue(stream));
-          int binf = fetch(vb, (const Eigen::half*)b.opaque(), n*k, AsGpuStreamValue(stream));
-          int cinf8 = fetch(vc8, (const Eigen::half*)c->opaque(), m*n, AsGpuStreamValue(stream));
+      if(temp_mem.get() == nullptr) {
+        hipEventRecord(f8_staging_event_, AsGpuStreamValue(stream));
+      }
 
-          hipError = hipStreamSynchronize(AsGpuStreamValue(stream));
-
-          int dev;
-          hipGetDevice(&dev);
-          printf("<%d> %d  %e %e -> %e (f8) / %e (f16)\n", dev, numeric_options.grad_flags & 3, stdev(va), stdev(vb), stdev(vc8), stdev(vc));
-
-          if(ainf || binf || cinf8)
-          {
-            printf("<%d> infinities in gemm_ex %s (%d %d %d); inputs %e %e\n", dev, report_string.c_str(), ainf, binf, cinf8, stdev(va), stdev(vb));
-            //printf("ERROR: non-finite output from rocblas_gemm_ex3 (%s)\n", report_string.c_str());
-            /*
-            */
-            //if(!isfinite(float(check[2][0]))) 
-            if((numeric_options.grad_flags & 3) == 0)
-            {
-              printf("Inputs:\nA\tB\n");
-              for(int i=0; i<4; i++)
-                printf("%e %e\n", float(va[i]), float(vb[i]));
-              printf("Outputs:\nF8\tF16\n");
-              for(int i=0; i<4; i++)
-                printf("%04x %04x  %e %e\n", *(uint16_t*)(&vc8[i]), *(uint16_t*)(&vc[i]), 
-                  float(vc8[i]), float(vc[i]));
-              double mean, maxval;
-              eval_differences(vc, vc8, mean, maxval);
-              printf("Mean difference: %e, max difference: %e\n", mean, maxval);
-              fflush(stdout);
-
-              printf("Nonfinite: %d (A) %d (B) %d (C-f8)\n", ainf, binf, cinf8);
-
-              float* pa32, *pb32, *pc32;
-              hipMalloc((void**)&pa32, va.size()*4);
-              hipMalloc((void**)&pb32, vb.size()*4);
-              hipMalloc((void**)&pc32, vc.size()*4);
-              for(int i=0; i<va.size(); i++)
-                pa32[i] = float(va[i]);
-              for(int i=0; i<vb.size(); i++)
-                pb32[i] = float(vb[i]);
-              float alpha32=1.0f, beta32=0.0f;
-
-              status = call_gemm_ex(rocblas_datatype_f32_r, pa32, pb32, pc32, pc32);
-              hipError = hipStreamSynchronize(AsGpuStreamValue(stream));
-
-              for(int i=0; i<vc.size(); i++)
-              {
-                  if(!isfinite(float(vc[i])) || !isfinite(float(vc8[i])))
-                  {
-                    printf("%d   %04x %04x  %e %e  %e\n", i, *(uint16_t*)&vc[i], *(uint16_t*)&vc8[i], 
-                       float(vc[i]), float(vc8[i]), pc32[i]);
-                    break;
-                  }
-              }          
-              fflush(stdout);
-              exit(0);
-            }
-          }
-        }
-  #endif
       maybe_stop_timer(timer, report_string, m*n*k*2);
       return retval;
     }
   }
 #endif // ROCBLAS_VERSION_MAJOR>3 || (ROCBLAS_VERSION_MAJOR==3 && ROCBLAS_VERSION_MINOR>=1) 
-  report_string = prefix + report_string;
 
-  maybe_start_timer(timer, stream);
+  if(dtype != blas::DataType::kFloat)
+    maybe_start_timer(timer, stream);
   switch (dtype) {
     case blas::DataType::kHalf:
       if (has_mfma_) {
@@ -1218,6 +1358,18 @@ tsl::Status ROCMBlas::DoBlasGemmBatchedInternal(
     prefix="BF16";
   else if (std::is_same_v<T, float>)
     prefix="F32";
+
+  int64_t arows = (transa == blas::Transpose::kNoTranspose) ? m : k;
+  int64_t acols = (transa == blas::Transpose::kNoTranspose) ? k : m;
+  int64_t brows = (transb == blas::Transpose::kNoTranspose) ? k : n;
+  int64_t bcols = (transb == blas::Transpose::kNoTranspose) ? n : k;
+  std::string report_string = "matmul_batch" + std::to_string(batch_count) 
+    + "(" + std::to_string(arows) + "," + std::to_string(acols) + ")x"
+    + "(" + std::to_string(brows) + "," + std::to_string(bcols) + ")"
+    + ((transa == blas::Transpose::kNoTranspose) ? "N" : "T")
+    + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T");
+    + "_" + prefix;
+/*
   std::string report_string = " matmul B " + std::to_string(batch_count)
     + " M " + std::to_string(m)
     + " N " + std::to_string(n) + " K " + std::to_string(k) 
@@ -1225,9 +1377,10 @@ tsl::Status ROCMBlas::DoBlasGemmBatchedInternal(
     + ((transa == blas::Transpose::kNoTranspose) ? "N" : "T")
     + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T")
     + " " + rocblas_func.kName;
-
+*/
   std::optional<gpu::GpuTimer> timer;
-  maybe_start_timer(timer, stream);
+  if (prefix != "F32")
+    maybe_start_timer(timer, stream);
   tsl::Status retval;
 
   bool ok;
@@ -1297,14 +1450,14 @@ public:
 }
 };
 
-
+#if 0
 class rocblas_hgemm_strided_batched_ex3 {
-  int grad_flags_;
+  int range1_, range2_;
   Stream* stream_;
   bool emulated_;
   bool ALT_;
 public:
-  rocblas_hgemm_strided_batched_ex3(int grad_flags, Stream* stream, bool emu, bool alt) : grad_flags_(grad_flags), stream_(stream), emulated_(emu), ALT_(alt) {}
+  rocblas_hgemm_strided_batched_ex3(int r1, int r2, Stream* stream, bool emu, bool alt) : range1_(r1), range2_(r2), stream_(stream), emulated_(emu), ALT_(alt) {}
   std::string kName = "rocblas_hgemm_strided_batched_ex3";
   rocblas_status operator()(rocblas_handle      handle,
                                                   rocblas_operation   transA,
@@ -1328,22 +1481,6 @@ public:
   float beta32 = float(*(const __half*)beta);
   uint32_t flags = rocblas_gemm_flags_none;
 
-  rocblas_computetype compute_type;
-  switch (grad_flags_ & 3) {
-    case 0:
-      compute_type = rocblas_compute_type_f8_f8_f32;
-      break;
-    case 1:
-      compute_type = rocblas_compute_type_bf8_f8_f32;
-      break;
-    case 2:
-      compute_type = rocblas_compute_type_f8_bf8_f32;
-      break;
-    case 3:
-      printf("Unexpected grad_flags for GEMM: %d\n", grad_flags_ & 3);
-      return rocblas_status_invalid_value;
-  }
-
   if(batch_stride_a!=m*k || batch_stride_b!=n*k) {
     printf("Warning: unexpected buffer dimensions (Strided Batched %c%c): m=%d n=%d k=%d batch_stride_a=%d batch_stride_b=%d batch_count=%d\n",
        transA==rocblas_operation_none ? 'N' : 'T',
@@ -1360,13 +1497,33 @@ public:
     return rocblas_status_memory_error;
   device_memory = DeviceMemory<uint8_t>(*(temp_mem->mutable_device_memory()));
 
-  bool a_fp8 = (grad_flags_ & 3) != 1;
-  bool b_fp8 = (grad_flags_ & 3) != 2;
+  //bool a_fp8 = (grad_flags_ & 3) != 1;
+  //bool b_fp8 = (grad_flags_ & 3) != 2;
   uint8_t* temp_a = (uint8_t*)device_memory.opaque();
   uint8_t* temp_b = temp_a+batch_stride_a*batch_count;
 
-  rocm_castHalf2F8(AsGpuStreamValue(stream_), temp_a, (const __half*)A, batch_stride_a*batch_count, a_fp8 ? 1 : 0);
-  rocm_castHalf2F8(AsGpuStreamValue(stream_), temp_b, (const __half*)B, batch_stride_b*batch_count, b_fp8 ? 1 : 0);
+  float mult_a = 1.0f, mult_b = 1.0f;
+  bool a_fp8 = true; //(range1_ != NumericOptions::E5);
+  bool b_fp8 = true; //(range2_ != NumericOptions::E5);
+
+  if(range1_ == NumericOptions::E4B10)
+    mult_a = 4.0f;
+  if(range1_ == NumericOptions::E4B12)
+    mult_a = 16.0f;
+  if(range1_ == NumericOptions::E4B14)
+    mult_a = 64.0f;
+
+  if(range2_ == NumericOptions::E4B10)
+    mult_b = 4.0f;
+  if(range2_ == NumericOptions::E4B12)
+    mult_b = 16.0f;
+  if(range2_ == NumericOptions::E4B14)
+    mult_b = 64.0f;
+
+  alpha32 *= 1./(mult_a*mult_b);
+
+  rocm_castHalf2F8(AsGpuStreamValue(stream_), temp_a, (const __half*)A, batch_stride_a*batch_count, a_fp8 ? 1 : 0, mult_a, f8_sr);
+  rocm_castHalf2F8(AsGpuStreamValue(stream_), temp_b, (const __half*)B, batch_stride_b*batch_count, b_fp8 ? 1 : 0, mult_b, f8_sr);
 
   if(emulated_) {
       rocm_castF82Half(AsGpuStreamValue(stream_), (__half*)A, temp_a, batch_stride_a*batch_count, a_fp8 ? 1 : 0);
@@ -1387,10 +1544,10 @@ public:
         rocblas_datatype_f32_r,
         rocblas_gemm_algo_standard,
         0,
-        flags);
+        flags); 
   }
 
-  return wrap::rocblas_gemm_strided_batched_ex3(handle,
+  return wrap::rocblas_gemm_strided_batched_ex(handle,
       transA, transB,
       m, n, k,
       &alpha32,
@@ -1400,12 +1557,13 @@ public:
       C, rocblas_datatype_f16_r, ldc, batch_stride_c,
       C, rocblas_datatype_f16_r, ldc, batch_stride_c,
       batch_count,
-      compute_type,
+      rocblas_datatype_f32_r,
       rocblas_gemm_algo_standard,
       0,
       rocblas_gemm_flags_none);
 }
 };
+#endif
 
 class rocblas_gemm_strided_batched_bf16 {
 public:
@@ -1441,13 +1599,11 @@ bool ROCMBlas::DoBlasGemmBatched(
   const Eigen::half beta_half(beta);
   tsl::Status status;
   //auto func = wrap::rocblas_hgemm_strided_batched;
-  if(!(numeric_options.grad_flags & NumericOptions::GF_Initialized)) {
-    printf("ERROR: DoBlasGemmBatched with uninitialized gradient flags\n");
-    exit(-1);
-  }
-
-  bool f8_on, f8_emu;
-  read_f8_env_flags(numeric_options, f8_on, f8_emu, has_f8_);
+  /*
+  bool f8_on = false, f8_emu, f8_sr;
+  if(numeric_options.range1 != NumericOptions::HIGHEST && numeric_options.range2 != NumericOptions::HIGHEST)
+    read_f8_env_flags(f8_on, f8_emu, f8_sr, has_f8_);
+  */
   auto call_gemm = [&](auto x) { return DoBlasGemmBatchedInternal(
         x,
         stream, transa, transb, m, n, k,
@@ -1455,11 +1611,14 @@ bool ROCMBlas::DoBlasGemmBatched(
         numeric_options,
         scratch_allocator);
   };
+  
 
-  bool is_backprop = (numeric_options.grad_flags & 3);
-  if (f8_on) {
-    status = call_gemm(rocblas_hgemm_strided_batched_ex3(numeric_options.grad_flags, stream, f8_emu, is_backprop && use_hgemm_alt_impl_));
-  } else if (has_mfma_) {
+  bool is_backprop = (numeric_options.range1 == NumericOptions::E5
+    || numeric_options.range2 == NumericOptions::E5);
+  //if (f8_on) {
+  //  status = call_gemm(rocblas_hgemm_strided_batched_ex3(numeric_options.grad_flags, stream, f8_emu, is_backprop && use_hgemm_alt_impl_));
+  //} else 
+  if (has_mfma_) {
     status = call_gemm(rocblas_hgemm_strided_batched_mfma(is_backprop && use_hgemm_alt_impl_));
   } else {
     status = call_gemm(wrap::rocblas_hgemm_strided_batched);
@@ -1592,38 +1751,53 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
       "c=%p ldc=%d",
       static_cast<int>(transa), static_cast<int>(transb), m, n, k, alpha,
       a.opaque(), lda, b.opaque(), ldb, beta, c->opaque(), ldc);
-  if(!(numeric_options.grad_flags & NumericOptions::GF_Initialized)) {
+  if(numeric_options.range1 == NumericOptions::UNDEFINED
+    || numeric_options.range2 == NumericOptions::UNDEFINED) {
     printf("ERROR: DoBlasGemmStridedBatched with uninitialized gradient flags\n");
     exit(-1);
   }
 
 
   tsl::Status status;
-  bool f8_on, f8_emu;
-  read_f8_env_flags(numeric_options, f8_on, f8_emu, has_f8_);
+//  bool f8_on = false, f8_emu, f8_sr, f8_dynamic_scale;
+//  if(numeric_options.range1 != NumericOptions::HIGHEST && numeric_options.range2 != NumericOptions::HIGHEST)
+//    read_f8_env_flags(f8_on, f8_emu, f8_sr, f8_dynamic_scale, has_f8_);
 
   std::optional<gpu::GpuTimer> timer;
-  maybe_start_timer(timer, stream);
+  if (dtype!=blas::DataType::kFloat)
+    maybe_start_timer(timer, stream);
   std::string prefix;
-  if (dtype==blas::DataType::kHalf) {
-    if(f8_on && !f8_emu)
-      prefix="F8";
-    else if(f8_on && f8_emu)
-      prefix="F8EMU";
-    else
-      prefix="F16";
-  }
+  if (dtype==blas::DataType::kHalf)
+    prefix="F16";
   else if (dtype==blas::DataType::kBF16)
     prefix="BF16";
   else if (dtype==blas::DataType::kFloat)
     prefix="F32";
+  int64_t arows = (transa == blas::Transpose::kNoTranspose) ? m : k;
+  int64_t acols = (transa == blas::Transpose::kNoTranspose) ? k : m;
+  int64_t brows = (transb == blas::Transpose::kNoTranspose) ? k : n;
+  int64_t bcols = (transb == blas::Transpose::kNoTranspose) ? n : k;
+  std::string report_string = "matmul_batch" + std::to_string(batch_count) 
+    + "(" + std::to_string(arows) + "," + std::to_string(acols) + ")x"
+    + "(" + std::to_string(brows) + "," + std::to_string(bcols) + ")"
+    + ((transa == blas::Transpose::kNoTranspose) ? "N" : "T")
+    + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T");
+  report_string += "_" + prefix;
+  /*
+  if(f8_on && !f8_emu)
+    report_string += "F8";
+  else if(f8_on && f8_emu)
+    report_string += "F8EMU";
+  */
+
+/*  
   std::string report_string = prefix + " matmul BS " + std::to_string(batch_count)
     + " M " + std::to_string(m)
     + " N " + std::to_string(n) + " K " + std::to_string(k) 
     + " "
     + ((transa == blas::Transpose::kNoTranspose) ? "N" : "T")
     + ((transb == blas::Transpose::kNoTranspose) ? "N" : "T");
-
+*/
   Eigen::half alpha_half, beta_half;
   Eigen::bfloat16 alpha_bf16, beta_bf16;
   if(dtype == blas::DataType::kHalf) {
@@ -1652,12 +1826,14 @@ tsl::Status ROCMBlas::DoBlasGemmStridedBatched(
 
   switch (dtype) {
     case blas::DataType::kHalf: {
-      bool is_backprop = (numeric_options.grad_flags & 3);
+      bool is_backprop = (numeric_options.range1 == NumericOptions::E5
+        || numeric_options.range2 == NumericOptions::E5);
 
-      if (f8_on) {
-        status = call_gemm(rocblas_hgemm_strided_batched_ex3(numeric_options.grad_flags, stream, f8_emu, is_backprop && use_hgemm_alt_impl_), rocblas_half());
-      }
-      else if (has_mfma_) {
+      //if (f8_on) {
+      //  status = call_gemm(rocblas_hgemm_strided_batched_ex3(numeric_options.grad_flags, stream, f8_emu, is_backprop && use_hgemm_alt_impl_), rocblas_half());
+      //}
+      //else 
+      if (has_mfma_) {
         status = call_gemm(rocblas_hgemm_strided_batched_mfma(is_backprop && use_hgemm_alt_impl_), rocblas_half());
       } else {
         status = call_gemm(wrap::rocblas_hgemm_strided_batched, rocblas_half());

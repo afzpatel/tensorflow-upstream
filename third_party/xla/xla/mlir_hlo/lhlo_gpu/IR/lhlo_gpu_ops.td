@@ -191,9 +191,7 @@ def LHLOGPU_CublasLtMatmulOp : LHLOGPU_Op<"cublas.lt.matmul", [AttrSizedOperandS
     F64Attr:$alpha_imag,
     F64Attr:$beta,
     CublasLtMatmulEpilogueAttr:$epilogue,
-    I64Attr:$algorithm,
-    OptionalAttr<BoolAttr>:$grad_x,
-    OptionalAttr<BoolAttr>:$grad_y);
+    I64Attr:$algorithm);
 }
 
 def LHLOGPU_CublasLtMatmulF8Op : LHLOGPU_Op<"cublas.lt.matmul.f8", [AttrSizedOperandSegments]> {

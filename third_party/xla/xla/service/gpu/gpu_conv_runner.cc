@@ -499,8 +499,6 @@ StatusOr<GpuConvConfig> GetGpuConvConfig(
         .set_filter_stride(static_cast<DimIndex>(dim), 1);
   }
 
-  config.conv_desc.set_grad_flags(backend_config.grad_conv_backend_flags());
-
   // Initialize bias descriptor for fused convolutions.
   BatchDescriptor& bias_descriptor = config.bias_descriptor;
   bias_descriptor = BatchDescriptor(config.output_descriptor.ndims());

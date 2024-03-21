@@ -128,18 +128,29 @@ static absl::Status GemmImpl(const ServiceExecutableRunOptions* run_options,
   VLOG(3) << "Running GEMM";
   se::Stream* stream = run_options->stream();
   Shape output_shape = ToShape(out);
-
+  /*
   int grad_flags = 0, grad_count = 0;
   for (auto value : precision) {
-    if(value>=PrecisionConfig::ACTIVATION && value<=PrecisionConfig::GRADIENT)
+    if(value>=PrecisionConfig::E4B8 && value<PrecisionConfig::E5)
     {
       if(grad_count<2 && value == PrecisionConfig::GRADIENT)
         grad_flags |= 1 << grad_count;
       grad_count++;
     }
+    if(value == PrecisionConfig::F8OFF)
+      grad_flags |= 4;
   }
-  if(grad_count==2)
-    grad_flags |= 256;
+  printf("GemmImpl: grad_flags %d, grad_count %d\n", grad_flags, grad_count);
+  fflush(stdout);
+  if(grad_count != 2)
+    exit(-1);
+  */
+  int dynamic_ranges[2]={-1,-1};
+  CHECK(precision.size()>=2);
+  dynamic_ranges[0] = precision[0];
+  dynamic_ranges[1] = precision[1];
+
+  //printf("GemmImpl: dynamic ranges %d %d\n", dynamic_ranges[0], dynamic_ranges[1]);
 
   // Get the gemm config from the state.
   TF_ASSIGN_OR_RETURN(GemmConfig * gemm_config, state.GetOrCreate([&] {
@@ -149,8 +160,9 @@ static absl::Status GemmImpl(const ServiceExecutableRunOptions* run_options,
                       dot_dims.rhs_batch, dot_dims.rhs_contract,
                       precision.empty() ? se::blas::kDefaultComputePrecision
                                         : *absl::c_max_element(precision),
-                                        std::nullopt, std::nullopt,
-                                        grad_flags);
+                                        dynamic_ranges,
+                                        std::nullopt, std::nullopt
+                                        );
     return ToAbsl(gemm_config);
   }));
 

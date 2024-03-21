@@ -1812,6 +1812,7 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
 
     const DotDimensionNumbers &dot_dims =
         gemm_backend_config.dot_dimension_numbers();
+    int dynamic_ranges[2]={-1,-1};
     TF_ASSIGN_OR_RETURN(
         GemmConfig gemm_config,
         GemmConfig::For(
@@ -1822,7 +1823,7 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
             /*output_shape=*/instr.shape(), gemm_backend_config.alpha_real(),
             gemm_backend_config.alpha_imag(), gemm_backend_config.beta(),
             /*algorithm*/ std::nullopt, se::blas::kDefaultComputePrecision,
-            0));
+            dynamic_ranges));
 
     if (matrix_name == "lhs" || matrix_name == "a") {
       return gemm_config.lhs_layout.order == MatrixLayout::Order::kColumnMajor;
@@ -1847,6 +1848,7 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
         bool types_are_supported_by_cublas_lt,
         TypesAreSupportedByCublasLt(instr, gemm_backend_config));
     if (!types_are_supported_by_cublas_lt) {
+      printf("GemmIsSupportedByCublasLt: bad type\n");
       return false;
     }
 
@@ -1864,6 +1866,7 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
     }
     if (batch_count > kMaxBatchCount) {
       // This is not supported by cublasLt.
+      printf("GemmIsSupportedByCublasLt: batch count\n");
       return false;
     }
 

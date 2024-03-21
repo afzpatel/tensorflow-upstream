@@ -85,6 +85,7 @@ struct GemmConfig {  // plain GemmConfig which is extended with create functions
   xla::complex128 alpha;
   double beta;
   int64_t compute_precision;
+  int dynamic_ranges[2];
   std::optional<int64_t> algorithm;
   std::optional<blas::ComputationType> compute_type;
 };

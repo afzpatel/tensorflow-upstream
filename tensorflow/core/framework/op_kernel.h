@@ -351,20 +351,6 @@ class OpKernelConstruction {
   // ideas.
   DeviceBase* device() const { return device_; }
 
-  inline int GetNumericFlags(bool readGradFlags=false) const {
-    // See stream_executor::NumericOptions::GradientFlags
-    int flags = 0;
-    if(readGradFlags) {
-      bool grad_a = false, grad_b = false;
-      GetAttr("grad_a", &grad_a);
-      GetAttr("grad_b", &grad_b);
-      flags += (grad_a ? 1 : 0) + (grad_b ? 2 : 0);
-    }
-    flags |= 256;
-
-    return flags;
-  }
-
  private:
   const DeviceType device_type_;
   DeviceBase* const device_;

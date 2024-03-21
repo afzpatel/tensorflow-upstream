@@ -295,12 +295,12 @@ StatusOr<bool> CanFoldTransposeOperandIntoDot(const HloInstruction& dot,
     absl::Span<const int64_t> rhs_contracting_dims, const Shape& output_shape,
     double alpha_real, double alpha_imag, double beta,
     std::optional<int64_t> algorithm, int64_t compute_precision, 
-    int grad_flags) {
+    const int* dynamic_ranges) {
   return GemmConfig::For(lhs_shape, lhs_batch_dims, lhs_contracting_dims,
                          rhs_shape, rhs_batch_dims, rhs_contracting_dims,
                          /*c_shape=*/output_shape, /*bias_shape_ptr=*/nullptr,
                          output_shape, alpha_real, alpha_imag, beta, algorithm,
-                         compute_precision, grad_flags);
+                         compute_precision, dynamic_ranges);
 }
 
 /*static*/ StatusOr<GemmConfig> GemmConfig::For(
@@ -310,7 +310,7 @@ StatusOr<bool> CanFoldTransposeOperandIntoDot(const HloInstruction& dot,
     absl::Span<const int64_t> rhs_contracting_dims, const Shape& c_shape,
     const Shape* bias_shape_ptr, const Shape& output_shape, double alpha_real,
     double alpha_imag, double beta, std::optional<int64_t> algorithm,
-    int64_t compute_precision, int grad_flags) {
+    int64_t compute_precision, const int* dynamic_ranges) {
   absl::Span<const int64_t> lhs_col_dims = lhs_contracting_dims;
   TF_ASSIGN_OR_RETURN(
       std::vector<int64_t> lhs_row_dims,
@@ -418,9 +418,10 @@ StatusOr<bool> CanFoldTransposeOperandIntoDot(const HloInstruction& dot,
                     {alpha_real, alpha_imag},
                     beta,
                     compute_precision,
+                    {dynamic_ranges[0], dynamic_ranges[1]},
                     algorithm,
-                    std::nullopt,
-                    grad_flags};
+                    std::nullopt
+                    };
 }
 
 /*static*/ StatusOr<GemmConfig> GemmConfig::For(const HloInstruction* gemm) {
@@ -438,28 +439,30 @@ StatusOr<bool> CanFoldTransposeOperandIntoDot(const HloInstruction& dot,
   const Shape& output_shape =
       gemm->shape().IsTuple() ? gemm->shape().tuple_shapes(0) : gemm->shape();
 
-  int grad_flags = 0;
+  int dynamic_ranges[2]={-1,-1};
   const HloDotInstruction* dot = dynamic_cast<const HloDotInstruction*>(gemm);
   const HloCustomCallInstruction* cc = dynamic_cast<const HloCustomCallInstruction*>(gemm);
-  if(dot) {
-    const PrecisionConfig& cfg = dot->precision_config();
-    grad_flags = GetXlaPrecisionConfigNumericFlags(&cfg);
-    printf("GemmConfig::For(HloDotInstruction): flags %d, %d\n",
-      GetXlaPrecisionConfigNumericFlags(&cfg), 
-      GetXlaPrecisionConfigNumericFlags(&config.precision_config()));
-  } else if(cc) {
-    grad_flags = GetXlaPrecisionConfigNumericFlags(&config.precision_config());
-    printf("GemmConfig::For(HloCustomCallInstruction): flags %d\n", grad_flags);
+  if(dot || cc) {
+    PrecisionConfig cfg;
+    if(dot)
+      cfg = dot->precision_config();
+    else
+      cfg = config.precision_config();
+    CHECK(cfg.operand_precision_size() >= 2);
+    dynamic_ranges[0] = cfg.operand_precision(0);
+    dynamic_ranges[1] = cfg.operand_precision(1); 
   } else {
     printf("GemmConfig::For(HloInstruction*): not a dot or CustomCall, can't determine flags\n");
   }
+  printf("GemmConfig::For(HloInstruction*): dynamic ranges %d %d\n",
+    dynamic_ranges[0], dynamic_ranges[1]);
 
   return GemmConfig::For(
       lhs_shape, dot_dims.lhs_batch_dimensions(),
       dot_dims.lhs_contracting_dimensions(), rhs_shape,
       dot_dims.rhs_batch_dimensions(), dot_dims.rhs_contracting_dimensions(),
       output_shape, config.alpha_real(), config.alpha_imag(), config.beta(),
-      algorithm, se::blas::kDefaultComputePrecision, grad_flags);
+      algorithm, se::blas::kDefaultComputePrecision, dynamic_ranges);
 }
 
 /*static*/ StatusOr<GemmConfig> GemmConfig::For(mlir::lmhlo_gpu::GEMMOp op) {
@@ -468,12 +471,16 @@ StatusOr<bool> CanFoldTransposeOperandIntoDot(const HloInstruction& dot,
   std::optional<int64_t> algorithm;
   if (op.getAlgorithm()) algorithm = *op.getAlgorithm();
 
-  int64_t compute_precision = 0;  // Default
-  int grad_flags = 0;
+  int64_t compute_precision = 0; // Default
+  int dynamic_ranges[2]={-1,-1};
   if (op.getPrecisionConfig().has_value()) {
-    auto precision_config = *op.getPrecisionConfig();
-    GetXlaPrecisionConfigNumericFlags(precision_config, grad_flags, compute_precision);
+    auto config = *op.getPrecisionConfig();
+    dynamic_ranges[0] = static_cast<int>(config[0].template cast<mlir::mhlo::PrecisionAttr>().getValue());
+    dynamic_ranges[1] = static_cast<int>(config[1].template cast<mlir::mhlo::PrecisionAttr>().getValue());
   }
+
+  printf("GemmConfig::For(GEMMOp): op.getPrecisionConfig().has_value() %d, dynamic ranges %d %d\n",
+    (int)op.getPrecisionConfig().has_value(), dynamic_ranges[0], dynamic_ranges[1]);
 
   return GemmConfig::For(
       GetShape(op.getA()), dot_dims.getLhsBatchingDimensions(),
@@ -481,7 +488,7 @@ StatusOr<bool> CanFoldTransposeOperandIntoDot(const HloInstruction& dot,
       dot_dims.getRhsBatchingDimensions(),
       dot_dims.getRhsContractingDimensions(), GetShape(op.getC()),
       op.getAlphaReal().convertToDouble(), op.getAlphaImag().convertToDouble(),
-      op.getBeta().convertToDouble(), algorithm, compute_precision, grad_flags);
+      op.getBeta().convertToDouble(), algorithm, compute_precision, dynamic_ranges);
 }
 
 namespace {
@@ -624,15 +631,13 @@ Status RunGemm(const GemmConfig& config, se::DeviceMemoryBase lhs_buffer,
   se::NumericOptions numeric_options{
       deterministic_ops,
       /*allow_tf32=*/config.compute_precision <= 1,
-      config.grad_flags
+      config.dynamic_ranges[0],
+      config.dynamic_ranges[1]
     };
 
   if (!algorithm) algorithm = config.algorithm;
-  if(must_swap_operands) {
-    numeric_options.grad_flags = ((numeric_options.grad_flags & 1)<<1)
-      | ((numeric_options.grad_flags & 2)>>1)
-      | (numeric_options.grad_flags & ~3);
-  }
+  if(must_swap_operands)
+    std::swap(numeric_options.range1, numeric_options.range2);
 
   std::tuple<PrimitiveType, PrimitiveType, PrimitiveType> operand_types{
       lhs_layout.dtype, rhs_layout.dtype, output_layout.dtype};

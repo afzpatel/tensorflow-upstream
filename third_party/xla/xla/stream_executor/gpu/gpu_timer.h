@@ -38,7 +38,7 @@ class GpuStream;
 // Timer is started once it's created, and is stopped once read.
 class GpuTimer {
  public:
-  static tsl::StatusOr<GpuTimer> Create(GpuStream* stream);
+  static tsl::StatusOr<GpuTimer> Create(GpuStream* stream, bool wall_time=false);
 
   // An ugly but a very convenient helper: creates a timer only when we need
   // one, but always returns an object. If `is_needed` is false, returns an
@@ -47,11 +47,8 @@ class GpuTimer {
       GpuStream* stream, bool is_needed);
 
   explicit GpuTimer(GpuExecutor* parent, GpuEventHandle start_event,
-                    GpuEventHandle stop_event, GpuStream* stream)
-      : parent_(parent),
-        start_event_(start_event),
-        stop_event_(stop_event),
-        stream_(stream) {}
+                    GpuEventHandle stop_event, GpuStream* stream,
+                    bool wall_time);
 
   GpuTimer(GpuTimer&& other)
       : parent_(other.parent_),
@@ -71,6 +68,8 @@ class GpuTimer {
   GpuEventHandle stop_event_ = nullptr;
   GpuStream* stream_;
   bool is_stopped_ = false;
+  bool is_wall_time_ = false;
+  absl::Time start_time_;
 
   GpuTimer(const GpuTimer&) = delete;
   void operator=(const GpuTimer&) = delete;

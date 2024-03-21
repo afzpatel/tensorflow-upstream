@@ -61,9 +61,6 @@ message CudnnConvBackendConfig {
   // Serialization of the graph described by the convolution and adjacent
   // pointwise ops.
   optional string serialized_graph = 9;
-
-  // See stream_executor::NumericOptions::GradientFlags
-  int64 grad_conv_backend_flags = 10;
 }
 
 // Backend config for the GEMM operation running through cuBLAS.

@@ -81,6 +81,42 @@ using dnn::PoolingDescriptor;
 
 namespace gpu {
 
+void update_db(std::string key, uint64_t flops, double ms);
+
+
+static void maybe_start_timer(std::optional<GpuTimer>& timer, Stream *stream)
+{
+  int64_t do_stats = 0;
+  tsl::Status status = tsl::ReadInt64FromEnvVar("GEMM_STATS", 0, &do_stats);
+  if(do_stats) {
+    hipStreamCaptureStatus captureStatus;
+    hipError_t err = hipStreamIsCapturing(AsGpuStreamValue(stream), &captureStatus);
+    if(err == hipSuccess && captureStatus == hipStreamCaptureStatusNone) {
+      auto timer_or_status = gpu::GpuTimer::Create(AsGpuStream(stream));
+      if (!timer_or_status.ok()) {
+        LOG(ERROR) << "Failed to create timer";
+        return;
+      }
+      timer.emplace(std::move(*timer_or_status));
+    }
+  }
+}
+
+static void maybe_stop_timer(std::optional<GpuTimer>& timer, 
+              std::string report_string, uint64_t flops)
+{
+    // At time intervals we're working with (often <200 microseconds), synchronization
+    // can have observable negative impact on overall timing.
+    if(timer) {
+      tsl::StatusOr<absl::Duration> elapsed = timer->GetElapsedDuration();
+      if(elapsed.ok()) {
+        double t = absl::ToDoubleMilliseconds(*elapsed);
+        update_db(report_string, flops, t);
+      }
+    }
+}
+
+
 // Populates the profile result if not empty.
 static tsl::Status PopulateProfileFromTimer(
     std::optional<GpuTimer>& timer, const dnn::AlgorithmDesc& algorithm,
@@ -3175,8 +3211,15 @@ class RocmConvRunner : public dnn::ConvRunner {
       wrap::miopenSetConvolutionAttribute(
           conv_desc_.handle(), MIOPEN_CONVOLUTION_ATTRIB_FP16_ALT_IMPL, 1);
     }
+
+    report_string_ = input_descriptor.ToShortString() + " x " + filter_descriptor.ToShortString();
+    flops_ = input_descriptor.ElementCount() * filter_descriptor.input_filter_width() * 
+      filter_descriptor.input_filter_height() * filter_descriptor.output_feature_map_count() * 2;
     // #endif
   }
+
+  std::string report_string_;
+  uint64_t flops_;
 
   std::string ToString() const override {
     return dnn::AlgorithmDesc{algo_id_, false, workspace_size_}.ToString();
@@ -3203,6 +3246,9 @@ class RocmConvRunner : public dnn::ConvRunner {
     TF_ASSIGN_OR_RETURN(
         std::optional<GpuTimer> timer,
         GpuTimer::CreateIfNeeded(AsGpuStream(stream), is_profiling));
+
+    std::optional<GpuTimer> timer2;
+    //maybe_start_timer(timer2, stream);
 
     miopenStatus_t status = miopenStatusSuccess;
     switch (kind_) {
@@ -3280,6 +3326,8 @@ class RocmConvRunner : public dnn::ConvRunner {
         profile_result->set_scratch_size(scratch_memory.size());
       }
     }
+
+    //maybe_stop_timer(timer2, report_string_, flops_);
 
     if (status != miopenStatusSuccess) {
       return tsl::errors::Internal("Failed to enqueue convolution on stream: ",
@@ -4032,7 +4080,7 @@ class ROCmFusedMatmulRunner : public dnn::FusedMatmulRunner {
   uint64_t _m, _n, _k;
   int64_t _lda, _ldb, _ldc;
   dnn::ActivationMode _activation_mode;
-  int _grad_flags;
+  int _range1, _range2;
  public:
   std::string ToString() const override;
   size_t GetWorkspaceSize() const override { return 0; }
@@ -4072,7 +4120,8 @@ ROCmFusedMatmulRunner::ROCmFusedMatmulRunner(
       _lda(lda),
       _ldb(ldb),
       _ldc(ldc),
-      _grad_flags(options.grad_flags),
+      _range1(options.range1),
+      _range2(options.range2),
       _activation_mode(activation_mode) {}
 
 tsl::StatusOr<AlgorithmDesc> ROCmFusedMatmulRunner::ToAlgorithmDesc() const {
@@ -4088,7 +4137,8 @@ tsl::StatusOr<AlgorithmDesc> ROCmFusedMatmulRunner::ToAlgorithmDesc() const {
   knobs.emplace_back(8, static_cast<int64_t>(_lda));
   knobs.emplace_back(9, static_cast<int64_t>(_ldb));
   knobs.emplace_back(10, static_cast<int64_t>(_ldc));
-  knobs.emplace_back(11, static_cast<int64_t>(_grad_flags));
+  knobs.emplace_back(11, static_cast<int64_t>(_range1));
+  knobs.emplace_back(12, static_cast<int64_t>(_range2));
   return AlgorithmDesc(0, knobs, 0);
 }
 
@@ -4109,7 +4159,7 @@ tsl::Status ROCmFusedMatmulRunner::gemm(Stream* stream, DeviceMemoryBase a_data,
       tb, ta, _n, _m, _k, static_cast<DeviceMemory<T>>(b_data), _ldb,
       static_cast<DeviceMemory<T>>(a_data), _lda,
       static_cast<DeviceMemory<T>*>(&c_data), _ldc, 
-      NumericOptions(false, true, _grad_flags));
+      NumericOptions(false, true, _range1, _range2));
 }
 
 template <typename T>

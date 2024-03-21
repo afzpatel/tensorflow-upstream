@@ -897,10 +897,15 @@ message PrecisionConfig {
     // Each U8/S8 value in a tensor actually represents 2 nibble values.
     PACKED_NIBBLE = 3;
 
-    ACTIVATION = 4;
-    GRADIENT = 5;
+    E4B6 = 4;
+    E4B8 = 5;
+    E4B10 = 6;
+    E4B12 = 7;
+    E4B14 = 8;
 
-    // Next: 6
+    E5 = 9;
+
+    // Next: 10
   }
   repeated Precision operand_precision = 1;
 

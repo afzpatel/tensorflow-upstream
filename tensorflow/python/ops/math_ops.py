@@ -3390,6 +3390,17 @@ def trace(x, name=None):
     x = ops.convert_to_tensor(x, name="x")
     return reduce_sum(array_ops.matrix_diag_part(x), [-1], name=name)
 
+@tf_export("gemm_precision")
+class Precision:
+  DEFAULT = 0
+  HIGHEST = 2
+  E4B6 = 4
+  E4B8 = 5
+  E4B10 = 6
+  E4B12 = 7
+  E4B14 = 8
+  E5 = 9
+
 
 @tf_export("linalg.matmul", "matmul")
 @dispatch.add_dispatch_support
@@ -3403,8 +3414,8 @@ def matmul(
     a_is_sparse=False,
     b_is_sparse=False,
     output_type=None,
-    grad_a=False,
-    grad_b=False,
+    grad_a=Precision.DEFAULT,
+    grad_b=Precision.DEFAULT,
     name=None,
 ):
   """Multiplies matrix `a` by matrix `b`, producing `a` * `b`.
@@ -3503,8 +3514,8 @@ def matmul(
     output_type: The output datatype if needed. Defaults to None in which case
       the output_type is the same as input type. Currently only works when input
       tensors are type (u)int8 and output_type can be int32.
-    grad_a: Set it to `True` to hint that Tensor `a` is for the backward pass.
-    grad_b: Set it to `True` to hint that Tensor `b` is for the backward pass.
+    grad_a: indicates dynamic range of a.
+    grad_b: indicates dynamic range of b.
     name: Name for the operation (optional).
 
   Returns:

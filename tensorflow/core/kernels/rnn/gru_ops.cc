@@ -29,7 +29,6 @@ class GRUCellBlockOp : public OpKernel {
  public:
   explicit GRUCellBlockOp(OpKernelConstruction* ctx) : OpKernel(ctx) 
   {
-    numeric_flags_ = ctx->GetNumericFlags();
   }
 
   // TODO(gitegaurav) Replace the input checks with some smarter function.
@@ -165,10 +164,8 @@ class GRUCellBlockOp : public OpKernel {
         b_ru_tensor->vec<T>(), b_c_tensor->vec<T>(), r_u_bar_tensor.matrix<T>(),
         r_tensor->matrix<T>(), u_tensor->matrix<T>(), c_tensor->matrix<T>(),
         h_tensor->matrix<T>(), x_h_prev_tensor.matrix<T>(),
-        x_h_prevr_tensor.matrix<T>(), numeric_flags_);
+        x_h_prevr_tensor.matrix<T>(), 0);
   }
-private:
-    int numeric_flags_;
 };
 
 // Register the Block GRU cell kernel for CPU.

@@ -165,6 +165,7 @@ StatusOr<const PlanAndAlgorithms*> GetPlanAndAlgorithms(
         .alpha = xla::complex128{1.0, 0.0},
         .beta = 0.0,
         .compute_precision = se::blas::kDefaultComputePrecision,
+        .dynamic_ranges = {params.range1, params.range2},
         .algorithm = {},
         .compute_type = computation_type,
     };

@@ -1048,8 +1048,6 @@ tsl::StatusOr<Operation*> LhloDialectEmitter::EmitDnnConvolution(
                                           &builder_));
     attrs.set(op.getResultScaleAttrName(),
               builder_.getF64FloatAttr(backend_config.conv_result_scale()));
-    attrs.set(op.getGradFlagsAttrName(), 
-              builder_.getI64IntegerAttr(backend_config.grad_conv_backend_flags()));
 
     const auto& algorithm = backend_config.algorithm();
     std::vector<int64_t> knob_ids;

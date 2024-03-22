@@ -39,6 +39,8 @@ if [ -f /usertools/cpu_gcc.bazelrc ]; then
           test \
           --config=sigbuild_local_cache \
           --config=nonpip \
+          --action_env=OPENBLAS_CORETYPE=Haswell \
+          --action_env=TF_ENABLE_ONEDNN_OPTS=0 \
           --local_test_jobs=${N_BUILD_JOBS} \
           --jobs=${N_BUILD_JOBS}
 else

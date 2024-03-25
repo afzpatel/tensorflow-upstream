@@ -25,6 +25,8 @@ STATUS=$?
 if [ $STATUS -ne 0 ]; then TF_GPU_COUNT=1; else
    TF_GPU_COUNT=$(rocm-smi -i|grep 'ID' |grep 'GPU' |wc -l)
 fi
+HIP_VISIBLE_DEVICES=1
+TF_GPU_COUNT=1
 TF_TESTS_PER_GPU=1
 N_TEST_JOBS=$(expr ${TF_GPU_COUNT} \* ${TF_TESTS_PER_GPU})
 
@@ -51,7 +53,7 @@ export TF_PYTHON_VERSION=$PYTHON_VERSION
 export TF_NEED_ROCM=1
 export ROCM_PATH=$ROCM_INSTALL_DIR
 
-if [ -f /usertools/rocm.bazelrc ]; then
+
 	# Use the bazelrc files in /usertools if available
  	if [ ! -d /tf ];then
            # The bazelrc files in /usertools expect /tf to exist
@@ -70,38 +72,12 @@ if [ -f /usertools/rocm.bazelrc ]; then
              --action_env=OPENBLAS_CORETYPE=Haswell \
              --action_env=TF_PYTHON_VERSION=$PYTHON_VERSION \
              --action_env=TF_ENABLE_ONEDNN_OPTS=0 \
+			 --test_env=TF_NUM_INTEROP_THREADS=16 \
+			 --test_env=TF_NUM_INTRAOP_THREADS=16 \
+			 --test_env=XLA_FLAGS="--xla_gpu_force_compilation_parallelism=16" \
+        	 --test_output=all \
              --test_env=TF_TESTS_PER_GPU=$TF_TESTS_PER_GPU \
-             --test_env=TF_GPU_COUNT=$TF_GPU_COUNT
-else
-	# Legacy style: run configure then build
-	yes "" | $PYTHON_BIN_PATH configure.py
+			 --test_env=HIP_VISIBLE_DEVICES=1 \
+             --test_env=TF_GPU_COUNT=$TF_GPU_COUNT \
+			 @local_xla//xla/tests/...
 
-	# Run bazel test command. Double test timeouts to avoid flakes.
-	bazel test \
-	      --config=rocm \
-	      -k \
-	      --test_tag_filters=gpu,-no_oss,-oss_excluded,-oss_serial,-no_gpu,-no_rocm,-benchmark-test,-rocm_multi_gpu,-tpu,-v1only \
-	      --jobs=30 \
-	      --local_ram_resources=60000 \
-	      --local_cpu_resources=15 \
-	      --local_test_jobs=${N_TEST_JOBS} \
-	      --test_env=TF_GPU_COUNT=$TF_GPU_COUNT \
-	      --test_env=TF_TESTS_PER_GPU=$TF_TESTS_PER_GPU \
-	      --test_env=HSA_TOOLS_LIB=libroctracer64.so \
-	      --test_env=TF_PYTHON_VERSION=$PYTHON_VERSION \
-	      --action_env=OPENBLAS_CORETYPE=Haswell \
-        --action_env=TF_ENABLE_ONEDNN_OPTS=0 \
-	      --test_timeout 920,2400,7200,9600 \
-	      --build_tests_only \
-	      --test_output=errors \
-	      --test_sharding_strategy=disabled \
-	      --test_size_filters=small,medium,large \
-	      --run_under=//tensorflow/tools/ci_build/gpu_build:parallel_gpu_execute \
-	      -- \
-	      //tensorflow/... \
-	      -//tensorflow/python/integration_testing/... \
-	      -//tensorflow/core/tpu/... \
-	      -//tensorflow/lite/... \
-	      -//tensorflow/compiler/tf2tensorrt/... \
-	      -//tensorflow/dtensor/python/tests:multi_client_test_nccl_2gpus
-fi

@@ -59,11 +59,6 @@ du -h /opt/rocm/
 /tmp/test_hip
 
 if [ -f /usertools/rocm.bazelrc ]; then
-	# Use the bazelrc files in /usertools if available
- 	if [ ! -d /tf ];then
-           # The bazelrc files in /usertools expect /tf to exist
-           mkdir /tf
-        fi
 	bazel \
 	     --bazelrc=/usertools/rocm.bazelrc \
              test \
@@ -82,7 +77,7 @@ if [ -f /usertools/rocm.bazelrc ]; then
 			 --test_env=XLA_FLAGS="--xla_gpu_force_compilation_parallelism=16" \
              --test_env=TF_TESTS_PER_GPU=$TF_TESTS_PER_GPU \
              --test_env=TF_GPU_COUNT=$TF_GPU_COUNT
-			  @local_xla//xla/tests/...
+			  //tensorflow/core/kernels/...
 else
 	# Legacy style: run configure then build
 	yes "" | $PYTHON_BIN_PATH configure.py

@@ -47,8 +47,8 @@ fi
 # Run configure.
 export PYTHON_BIN_PATH=`which python3`
 
-ls -al /opt/rocm/bin/
-du -h /opt/rocm/
+#ls -al /opt/rocm/bin/
+#du -h /opt/rocm/
 #hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
 /opt/rocm/llvm/bin/clang -x hip -std=c++17 test_hip.cc -lstdc++ --hip-link -o /tmp/test_hip --rocm-path=/opt/rocm-6.0.2
 /tmp/test_hip
@@ -60,10 +60,6 @@ export ROCM_PATH=$ROCM_INSTALL_DIR
 
 if [ -f /usertools/rocm.bazelrc ]; then
 	# Use the bazelrc files in /usertools if available
- 	if [ ! -d /tf ];then
-           # The bazelrc files in /usertools expect /tf to exist
-           mkdir /tf
-        fi
 	bazel \
 	     --bazelrc=/usertools/rocm.bazelrc \
              test \

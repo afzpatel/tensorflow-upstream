@@ -47,7 +47,7 @@ fi
 # Run configure.
 export PYTHON_BIN_PATH=`which python3`
 
-hipcc -std=c++17 test_hip.cc -o /tmp/test_hip
+hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
 /tmp/test_hip
 
 PYTHON_VERSION=`python3 -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')"`

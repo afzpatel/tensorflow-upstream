@@ -52,7 +52,7 @@ export TF_PYTHON_VERSION=$PYTHON_VERSION
 export TF_NEED_ROCM=1
 export ROCM_PATH=$ROCM_INSTALL_DIR
 
-hipcc -std=c++17 test_hip.cc -o /tmp/test_hip
+hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
 /tmp/test_hip
 
 if [ -f /usertools/rocm.bazelrc ]; then

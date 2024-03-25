@@ -20,6 +20,7 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/string_view.h"
 #include "tensorflow/compiler/mlir/quantization/stablehlo/cc/graph_def.h"
+#include "tensorflow/compiler/mlir/quantization/stablehlo/quantization_config.pb.h"
 #include "tensorflow/compiler/mlir/quantization/tensorflow/exported_model.pb.h"
 #include "tensorflow/compiler/mlir/quantization/tensorflow/python/py_function_lib.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
@@ -29,16 +30,16 @@ limitations under the License.
 namespace stablehlo::quantization {
 namespace {
 
+using ::stablehlo::quantization::DebuggerConfig;
 using ::tensorflow::NodeDef;
 using ::tensorflow::SignatureDef;
-using ::tensorflow::quantization::DebuggerOptions;
 using ::tensorflow::quantization::ExportedModel;
 using ::tensorflow::quantization::PyFunctionLibrary;
 
 }  // namespace
 
 void EnableDebugging(
-    ExportedModel& exported_model, const DebuggerOptions& debugger_options,
+    ExportedModel& exported_model, const DebuggerConfig& debugger_config,
     const PyFunctionLibrary& py_function_library,
     const absl::string_view src_saved_model_path,
     const std::unordered_set<std::string>& tags,
@@ -51,13 +52,13 @@ void EnableDebugging(
     }
   });
 
-  if (debugger_options.debugger_type() ==
-      DebuggerOptions::DEBUGGER_TYPE_WHOLE_MODEL) {
+  if (debugger_config.debugger_type() ==
+      DebuggerConfig::DEBUGGER_TYPE_WHOLE_MODEL) {
     // TODO: b/295139417 - Remove CustomAggregator op in unquantized dump model.
     // TODO: b/296916287 - Create a separate function for saving unquantized
     // dump model.
     py_function_library.SaveExportedModel(
-        debugger_options.unquantized_dump_model_path(), exported_model,
+        debugger_config.unquantized_dump_model_path(), exported_model,
         src_saved_model_path, tags, signature_def_map);
 
     // Update the `DumpTensor` ops' file name in `graph_def`.

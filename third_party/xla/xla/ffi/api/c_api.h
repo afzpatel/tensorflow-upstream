@@ -20,12 +20,16 @@ limitations under the License.
 #include <stdint.h>
 
 // XLA FFI C API follows PJRT API style for consistency. See `pjrt_c_api.h`.
+// More details on versioning strategy and example version checks:
+// https://github.com/tensorflow/community/blob/master/rfcs/20200612-stream-executor-c-api/C_API_versioning_strategy.md
 
 // Every struct passed across the C API boundary has its size as a member, and
 // we use it as a sanity check for API compatibility.
 #define XLA_FFI_STRUCT_SIZE(struct_type, last_field) \
   (offsetof(struct_type, last_field) + sizeof(((struct_type*)0)->last_field))
 
+// Must update XLA_FFI_DEFINE_STRUCT_TRAITS with the new `last_field` after
+// adding a new member to a struct.
 #define XLA_FFI_DEFINE_STRUCT_TRAITS(sname, last_field) \
   typedef struct sname sname;                           \
   enum { sname##_STRUCT_SIZE = XLA_FFI_STRUCT_SIZE(sname, last_field) }
@@ -263,6 +267,15 @@ XLA_FFI_DEFINE_STRUCT_TRAITS(XLA_FFI_CallFrame, attrs);
 // External functions registered with XLA as FFI handlers.
 typedef XLA_FFI_Error* XLA_FFI_Handler(XLA_FFI_CallFrame* call_frame);
 
+enum XLA_FFI_Handler_TraitsBits {
+  // Calls to FFI handler are safe to trace into the command buffer. It means
+  // that calls to FFI handler always launch exactly the same device operations
+  // (can depend on attribute values) that can be captured and then replayed.
+  XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE = 1u << 0,
+};
+
+typedef uint32_t XLA_FFI_Handler_Traits;
+
 struct XLA_FFI_Handler_Register_Args {
   size_t struct_size;
   void* priv;
@@ -270,9 +283,10 @@ struct XLA_FFI_Handler_Register_Args {
   const char* name;      // null terminated
   const char* platform;  // null terminated
   XLA_FFI_Handler* handler;
+  XLA_FFI_Handler_Traits traits;
 };
 
-XLA_FFI_DEFINE_STRUCT_TRAITS(XLA_FFI_Handler_Register_Args, handler);
+XLA_FFI_DEFINE_STRUCT_TRAITS(XLA_FFI_Handler_Register_Args, traits);
 
 typedef XLA_FFI_Error* XLA_FFI_Handler_Register(
     XLA_FFI_Handler_Register_Args* args);
@@ -316,7 +330,7 @@ struct XLA_FFI_Api {
 
 #undef _XLA_FFI_API_STRUCT_FIELD
 
-XLA_FFI_DEFINE_STRUCT_TRAITS(XLA_FFI_Api, XLA_FFI_Handler_Register);
+XLA_FFI_DEFINE_STRUCT_TRAITS(XLA_FFI_Api, XLA_FFI_Stream_Get);
 
 #ifdef __cplusplus
 }

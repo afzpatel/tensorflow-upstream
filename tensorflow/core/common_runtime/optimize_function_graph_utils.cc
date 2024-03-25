@@ -41,6 +41,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/placer.h"
 #include "tensorflow/core/common_runtime/replicate_per_replica_nodes.h"
 #include "tensorflow/core/framework/device.h"
+#include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/metrics.h"
 #include "tensorflow/core/framework/optimized_function_graph.pb.h"
@@ -218,10 +219,10 @@ StatusOr<OptimizedFunctionGraphInfo> ReadFromCache(const string& file_name,
 
   optimized_function_graph_proto.ParseFromString(
       optimized_function_graph_proto_str);
-  TF_ASSIGN_OR_RETURN(
-      StatusOr<OptimizedFunctionGraphInfo>
-          optimized_function_graph_info_restored,
-      OptimizedFunctionGraphInfo::FromProto(optimized_function_graph_proto));
+  TF_ASSIGN_OR_RETURN(absl::StatusOr<OptimizedFunctionGraphInfo>
+                          optimized_function_graph_info_restored,
+                      OptimizedFunctionGraphInfo::FromProto(
+                          std::move(optimized_function_graph_proto)));
 
   const absl::Duration cache_reading_duration =
       absl::Now() - cache_reading_start_time;
@@ -640,8 +641,12 @@ StatusOr<OptimizedFunctionGraphInfo> OptimizeFunctionGraph(
 
   graph->mutable_flib_def()->set_default_registry(nullptr);
   graph->mutable_flib_def()->Clear();
+
+  FunctionLibraryDefinition pruned_lib_def =
+      reachable_lib_def.ReachableDefinitions(*graph);
+
   return OptimizedFunctionGraphInfo(
-      function_name, std::move(graph), std::move(reachable_lib_def),
+      function_name, std::move(graph), std::move(pruned_lib_def),
       node_name_to_control_ret, ret_types, ret_nodes.size(),
       env->NowMicros() - graph_optimization_start_time_usecs,
       optimization_source);

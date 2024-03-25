@@ -19,6 +19,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/log/log.h"
 #include "llvm/ADT/StringRef.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
@@ -27,7 +28,6 @@ limitations under the License.
 #include "mlir/Transforms/Passes.h"  // from @llvm-project
 #include "stablehlo/experimental/transforms/Passes.h"  // from @stablehlo
 #include "tensorflow/compiler/mlir/lite/common/tfl_pass_config.h"
-#include "tensorflow/compiler/mlir/lite/quantization/quantization_config.h"
 #include "tensorflow/compiler/mlir/lite/quantization/quantization_passes.h"
 #include "tensorflow/compiler/mlir/lite/quantization/tensorflow/passes.h"
 #include "tensorflow/compiler/mlir/lite/stablehlo/transforms/legalize_tf_xla_call_module_to_stablehlo_pass.h"
@@ -35,6 +35,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/lite/stablehlo/transforms/transforms.h"
 #include "tensorflow/compiler/mlir/lite/transforms/passes.h"
 #include "tensorflow/compiler/mlir/lite/utils/fake_quant_utils.h"
+#include "tensorflow/compiler/mlir/quantization/common/quantization_lib/quantization_config.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/passes.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/tf_saved_model_passes.h"
 #include "xla/mlir_hlo/mhlo/transforms/passes.h"
@@ -155,6 +156,8 @@ void AddPreQuantizationStableHloToTfPasses(
       mlir::mhlo::createChloLegalizeToHloBasisOpsPass());
   pass_manager.addNestedPass<mlir::func::FuncOp>(
       mlir::mhlo::createChloLegalizeToHloPass());
+  pass_manager.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createShapeLegalizeToHloPass());
   pass_manager.addPass(mlir::mhlo::createHloLegalizeToStablehloPass());
 
   // The following two passes find specific uniform quantization patterns in
@@ -197,8 +200,9 @@ void AddPreQuantizationStableHloToTfPasses(
   pass_manager.addNestedPass<mlir::func::FuncOp>(
       mlir::mhlo::createFlattenTuplePass());
 
-  mlir::odml::AddMhloOptimizationPasses(pass_manager,
-                                        pass_config.enable_stablehlo_quantizer);
+  mlir::odml::AddMhloOptimizationPasses(
+      pass_manager,
+      /*add_fold_broadcast_pass=*/pass_config.enable_stablehlo_quantizer);
 
   // Undo the MHLO::BroadcastInDimOp folding pattern on splat constants. This
   // pass must be added right before the legalization because pattern rewriter
@@ -218,12 +222,6 @@ void AddPostQuantizationStableHloToTfPasses(
     const mlir::TFL::PassConfig& pass_config,
     mlir::OpPassManager& pass_manager) {
   if (pass_config.enable_stablehlo_quantizer) {
-    // StableHLO Quantizer emits quantized StableHLO module serialized within a
-    // XlaCallModule op. Add this pass to extract StableHLO module from the
-    // XlaCallModuleOp.
-    pass_manager.addPass(
-        mlir::odml::CreateLegalizeTFXlaCallModuleToStablehloPass());
-
     // Convert StableHLO -> TFLite for fused quantization patterns early so that
     // quantized types do not go through the TF dialect which doesn't support
     // quantized types.
@@ -232,6 +230,11 @@ void AddPostQuantizationStableHloToTfPasses(
 
     // StableHLO -> MHLO
     pass_manager.addPass(mlir::mhlo::createStablehloLegalizeToHloPass());
+  }
+
+  if (pass_config.enable_composite_direct_lowering) {
+    LOG(WARNING) << "Direct lowerting of composites to TFLite ops is not "
+                    "implemented yet.";
   }
 
   // TFLite dialect passes.
@@ -454,6 +457,7 @@ void AddPostVariableFreezingTFToTFLConversionPasses(
       pass_manager->addNestedPass<mlir::func::FuncOp>(
           mlir::TFL::CreateOptimizeBatchMatmulPass());
     }
+    pass_manager->addPass(mlir::TFL::CreatePushTransposeThroughEwisePass());
     pass_manager->addNestedPass<mlir::func::FuncOp>(
         mlir::TFL::CreateOptimizePass(/*enable_canonicalization=*/true,
                                       toco_flags.disable_fuse_mul_and_fc()));

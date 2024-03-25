@@ -40,9 +40,11 @@ limitations under the License.
 #include "xla/service/custom_call_target_registry.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
+#include "xla/service/gpu/gpu_constants.h"
 #include "xla/service/gpu/hlo_traversal.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/shape.h"
+#include "xla/shape_util.h"
 #include "xla/util.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
@@ -78,14 +80,39 @@ bool IsCustomCall(const HloInstruction* hlo, absl::string_view platform_name) {
   void* call_target = CustomCallTargetRegistry::Global()->Lookup(
       call_target_name, std::string(platform_name));
 
-  absl::StatusOr<XLA_FFI_Handler*> handler =
+  absl::StatusOr<ffi::HandlerRegistration> handler_registration =
       ffi::FindHandler(call_target_name, platform_name);
 
   // At least one implementation should be available at run time.
   bool found_custom_call = !is_ffi_custom_call && call_target != nullptr;
-  bool found_ffi_handler = is_ffi_custom_call && handler.ok();
+  bool found_ffi_handler = is_ffi_custom_call && handler_registration.ok();
 
   return found_custom_call || found_ffi_handler;
+}
+
+// Returns true if the slice is 128-byte-aligned. The slice starting
+// address is determined by the product of all non-sliced dimensions and an
+// offset defined by `slice_starts` of the slice op.
+bool IsAlignedSlice(const HloInstruction& instr) {
+  if (!IsContiguousSlice(instr)) return false;
+
+  auto slice = Cast<HloSliceInstruction>(&instr);
+  const Shape& src_shape = instr.operand(0)->shape();
+  const Shape& dst_shape = instr.shape();
+
+  auto strides = ShapeUtil::ByteStrides(dst_shape);
+  if (!strides.has_value()) return false;
+
+  for (auto dim : dst_shape.layout().minor_to_major()) {
+    if ((strides.value()[dim] % kXlaAllocatedBufferAlignBytes) == 0)
+      return true;
+    if (dst_shape.dimensions(dim) < src_shape.dimensions(dim)) {
+      return ((strides.value()[dim] * slice->slice_starts(dim)) %
+                  kXlaAllocatedBufferAlignBytes ==
+              0);
+    }
+  }
+  return true;
 }
 
 absl::InlinedVector<HloInstruction*, 8> GetSlicedOperandChains(
@@ -119,12 +146,11 @@ absl::InlinedVector<HloInstruction*, 8> GetSlicedOperandChains(
           // if other uses are also custom calls though.
           // TODO(vuson): lift the second restriction by considering fusing the
           // non-noop instructions to the computation if possible.
-          return cur->user_count() > 1 || !IsNoOp(cur) ||
-                 IsContiguousSlice(*cur);
+          return cur->user_count() > 1 || !IsNoOp(cur) || IsAlignedSlice(*cur);
         });
     if (maybe_slice_adaptor == std::nullopt) continue;
     const auto& maybe_slice_instr = maybe_slice_adaptor->instruction();
-    if (IsContiguousSlice(maybe_slice_instr) ||
+    if (IsAlignedSlice(maybe_slice_instr) ||
         processed_sliced_chain_set.contains(&maybe_slice_instr)) {
       sliced_operand_chains.insert(sliced_operand_chains.end(),
                                    maybe_sliced_operand_chain.begin(),

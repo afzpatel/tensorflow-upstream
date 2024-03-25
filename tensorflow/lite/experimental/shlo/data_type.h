@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_LITE_EXPERIMENTAL_SHLO_DATA_TYPE_H_
 
 #include <cstdint>
+#include <limits>
 
 #include "tensorflow/lite/experimental/shlo/bf16.h"
 #include "tensorflow/lite/experimental/shlo/f16.h"
@@ -43,34 +44,50 @@ struct Storage {};
 template <>
 struct Storage<DataType::kI1> {
   using Type = bool;
+  static constexpr Type kMinValue = std::numeric_limits<Type>::lowest();
+  static constexpr Type kMaxValue = std::numeric_limits<Type>::max();
 };
 template <>
 struct Storage<DataType::kSI4> {
   using Type = int8_t;
+  static constexpr Type kMinValue = -8;
+  static constexpr Type kMaxValue = 7;
 };
 template <>
 struct Storage<DataType::kSI8> {
   using Type = int8_t;
+  static constexpr Type kMinValue = std::numeric_limits<Type>::lowest();
+  static constexpr Type kMaxValue = std::numeric_limits<Type>::max();
 };
 template <>
 struct Storage<DataType::kSI16> {
   using Type = int16_t;
+  static constexpr Type kMinValue = std::numeric_limits<Type>::lowest();
+  static constexpr Type kMaxValue = std::numeric_limits<Type>::max();
 };
 template <>
 struct Storage<DataType::kSI32> {
   using Type = int32_t;
+  static constexpr Type kMinValue = std::numeric_limits<Type>::lowest();
+  static constexpr Type kMaxValue = std::numeric_limits<Type>::max();
 };
 template <>
 struct Storage<DataType::kBF16> {
   using Type = BF16;
+  static constexpr Type kMinValue = std::numeric_limits<Type>::lowest();
+  static constexpr Type kMaxValue = std::numeric_limits<Type>::max();
 };
 template <>
 struct Storage<DataType::kF16> {
   using Type = F16;
+  static constexpr Type kMinValue = std::numeric_limits<Type>::lowest();
+  static constexpr Type kMaxValue = std::numeric_limits<Type>::max();
 };
 template <>
 struct Storage<DataType::kF32> {
   using Type = float;
+  static constexpr Type kMinValue = std::numeric_limits<Type>::lowest();
+  static constexpr Type kMaxValue = std::numeric_limits<Type>::max();
 };
 
 template <DataType data_type>
@@ -78,10 +95,17 @@ using StorageType = typename Storage<data_type>::Type;
 
 constexpr bool IsBool(DataType data_type) { return data_type == DataType::kI1; }
 
-constexpr bool IsInteger(DataType data_type) {
+constexpr bool IsSignedInteger(DataType data_type) {
   return data_type == DataType::kSI4 || data_type == DataType::kSI8 ||
          data_type == DataType::kSI16 || data_type == DataType::kSI32;
 }
+
+constexpr bool IsUnsignedInteger(DataType data_type) { return false; }
+
+constexpr bool IsInteger(DataType data_type) {
+  return IsSignedInteger(data_type) || IsUnsignedInteger(data_type);
+}
+
 constexpr bool IsFloat(DataType data_type) {
   return data_type == DataType::kBF16 || data_type == DataType::kF16 ||
          data_type == DataType::kF32;

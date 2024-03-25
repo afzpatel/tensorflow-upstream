@@ -61,6 +61,7 @@ from tensorflow.lite.python.util import convert_debug_info_func as _convert_debu
 from tensorflow.lite.python.util import freeze_graph as _freeze_graph
 from tensorflow.lite.python.util import get_debug_info as _get_debug_info
 from tensorflow.lite.python.util import get_grappler_config as _get_grappler_config
+from tensorflow.lite.python.util import get_model_hash as _get_model_hash
 from tensorflow.lite.python.util import get_sparsity_modes as _get_sparsity_modes
 from tensorflow.lite.python.util import get_tensor_name as _get_tensor_name
 from tensorflow.lite.python.util import get_tensors_from_tensor_names as _get_tensors_from_tensor_names
@@ -664,6 +665,7 @@ class TFLiteConverterBase:
     self._experimental_reduce_type_precision = False
     self._experimental_qdq_conversion_mode = None
     self._experimental_disable_per_channel_quantization_for_dense_layers = False
+    self._experimental_enable_composite_direct_lowering = False
 
     # Debug parameters
     self.ir_dump_dir = None
@@ -818,6 +820,9 @@ class TFLiteConverterBase:
         "disable_per_channel_quantization_for_dense_layers": (
             self._experimental_disable_per_channel_quantization_for_dense_layers
         ),
+        "enable_composite_direct_lowering": (
+            self._experimental_enable_composite_direct_lowering
+        ),
     }
 
     if self.saved_model_dir:
@@ -863,7 +868,11 @@ class TFLiteConverterBase:
                     )
                 ],
                 enable_per_channel_quantized_weight=True,
-            )
+            ),
+            # For ODML use cases, uniform quantized types should be left intact.
+            pipeline_config=qc.PipelineConfig(
+                unpack_quantized_types=False,
+            ),
         )
 
         args["quantization_config"] = quantization_config
@@ -1148,7 +1157,9 @@ class TFLiteConverterBase:
     # Populates the conversion metadata.
     # TODO(b/202090541): Collects sparsity block size information.
     sparsity_modes = _get_sparsity_modes(model_object)
+    model_hash = _get_model_hash(model_object)
     self._metadata.options.modelOptimizationModes.extend(sparsity_modes)
+    self._metadata.environment.modelHash = model_hash
     model_object = _populate_conversion_metadata(model_object, self._metadata)
     return flatbuffer_utils.convert_object_to_bytearray(model_object)
 

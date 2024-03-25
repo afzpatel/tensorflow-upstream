@@ -43,7 +43,6 @@ limitations under the License.
 
 namespace xla {
 namespace gpu {
-namespace {
 
 const Shape& GetLargestConcatOperandShape(const HloFusionAnalysis& analysis) {
   const HloInstruction* concat = analysis.fusion_heroes().front();
@@ -55,13 +54,11 @@ const Shape& GetLargestConcatOperandShape(const HloFusionAnalysis& analysis) {
   return operand->shape();
 }
 
-}  // namespace
-
 ConcatenateFusion::ConcatenateFusion(const HloFusionAnalysis& analysis)
     : analysis_(analysis) {}
 
 std::optional<IndexingMap> ConcatenateFusion::ComputeThreadIdToOutputIndexing(
-    int64_t output_id, mlir::MLIRContext* ctx) const {
+    int64_t output_id, IndexingContext* indexing_context) const {
   return std::nullopt;  // TODO(b/319081342): Implement this.
 }
 

@@ -28,6 +28,8 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
+const Shape& GetLargestConcatOperandShape(const HloFusionAnalysis& analysis);
+
 // Emits a kernel for the given hlo instruction where each thread produces
 // one element of each concat operand.
 class ConcatenateFusion : public KernelFusionEmitterBase {
@@ -36,11 +38,11 @@ class ConcatenateFusion : public KernelFusionEmitterBase {
   LaunchDimensions launch_dimensions() const override;
 
   std::optional<IndexingMap> ComputeThreadIdToOutputIndexing(
-      int64_t output_id, mlir::MLIRContext* ctx) const override;
+      int64_t output_id, IndexingContext* indexing_context) const override;
 
   std::optional<IndexingMap> ComputeThreadIdToInputIndexing(
       int64_t root_index, int64_t hero_operand_index,
-      mlir::MLIRContext* ctx) const override {
+      IndexingContext* indexing_context) const override {
     // TODO(b/319081342): Implement this.
     return std::nullopt;
   }

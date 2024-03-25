@@ -25,6 +25,8 @@ STATUS=$?
 if [ $STATUS -ne 0 ]; then TF_GPU_COUNT=1; else
    TF_GPU_COUNT=$(rocm-smi -i|grep 'ID' |grep 'GPU' |wc -l)
 fi
+HIP_VISIBLE_DEVICES=1
+TF_GPU_COUNT=1
 TF_TESTS_PER_GPU=1
 N_TEST_JOBS=$(expr ${TF_GPU_COUNT} \* ${TF_TESTS_PER_GPU})
 
@@ -70,8 +72,13 @@ if [ -f /usertools/rocm.bazelrc ]; then
              --action_env=OPENBLAS_CORETYPE=Haswell \
              --action_env=TF_PYTHON_VERSION=$PYTHON_VERSION \
              --action_env=TF_ENABLE_ONEDNN_OPTS=0 \
+ 			 --test_env=TF_NUM_INTEROP_THREADS=16 \
+			 --test_env=TF_NUM_INTRAOP_THREADS=16 \
+			 --test_env=XLA_FLAGS="--xla_gpu_force_compilation_parallelism=16" \
+			 --test_env=HIP_VISIBLE_DEVICES=1 \
              --test_env=TF_TESTS_PER_GPU=$TF_TESTS_PER_GPU \
              --test_env=TF_GPU_COUNT=$TF_GPU_COUNT
+			  @local_xla//xla/tests/...
 else
 	# Legacy style: run configure then build
 	yes "" | $PYTHON_BIN_PATH configure.py
@@ -89,6 +96,10 @@ else
 	      --test_env=TF_TESTS_PER_GPU=$TF_TESTS_PER_GPU \
 	      --test_env=HSA_TOOLS_LIB=libroctracer64.so \
 	      --test_env=TF_PYTHON_VERSION=$PYTHON_VERSION \
+		 --test_env=TF_NUM_INTEROP_THREADS=16 \
+ 		 --test_env=TF_NUM_INTRAOP_THREADS=16 \
+		 --test_env=XLA_FLAGS="--xla_gpu_force_compilation_parallelism=16" \
+		 --test_env=HIP_VISIBLE_DEVICES=1 \
 	      --action_env=OPENBLAS_CORETYPE=Haswell \
         --action_env=TF_ENABLE_ONEDNN_OPTS=0 \
 	      --test_timeout 920,2400,7200,9600 \
@@ -98,10 +109,5 @@ else
 	      --test_size_filters=small,medium,large \
 	      --run_under=//tensorflow/tools/ci_build/gpu_build:parallel_gpu_execute \
 	      -- \
-	      //tensorflow/... \
-	      -//tensorflow/python/integration_testing/... \
-	      -//tensorflow/core/tpu/... \
-	      -//tensorflow/lite/... \
-	      -//tensorflow/compiler/tf2tensorrt/... \
-	      -//tensorflow/dtensor/python/tests:multi_client_test_nccl_2gpus
+	       @local_xla//xla/tests/...
 fi

@@ -49,7 +49,8 @@ export PYTHON_BIN_PATH=`which python3`
 
 ls -al /opt/rocm/bin/
 du -h /opt/rocm/
-hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
+#hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
+/opt/rocm/llvm/bin/clang -x hip -std=c++17 test_hip.cc -lstdc++ --hip-link -o /tmp/test_hip
 /tmp/test_hip
 
 PYTHON_VERSION=`python3 -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')"`

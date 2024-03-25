@@ -54,7 +54,8 @@ export ROCM_PATH=$ROCM_INSTALL_DIR
 
 ls -al /opt/rocm/bin/
 du -h /opt/rocm/
-hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
+#hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
+/opt/rocm/llvm/bin/clang -x hip -std=c++17 test_hip.cc -lstdc++ --hip-link -o /tmp/test_hip
 /tmp/test_hip
 
 if [ -f /usertools/rocm.bazelrc ]; then

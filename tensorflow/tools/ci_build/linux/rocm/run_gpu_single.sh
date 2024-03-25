@@ -25,7 +25,6 @@ STATUS=$?
 if [ $STATUS -ne 0 ]; then TF_GPU_COUNT=1; else
    TF_GPU_COUNT=$(rocm-smi -i|grep 'ID' |grep 'GPU' |wc -l)
 fi
-HIP_VISIBLE_DEVICES=1
 TF_GPU_COUNT=1
 TF_TESTS_PER_GPU=1
 N_TEST_JOBS=$(expr ${TF_GPU_COUNT} \* ${TF_TESTS_PER_GPU})
@@ -47,6 +46,9 @@ fi
 
 # Run configure.
 export PYTHON_BIN_PATH=`which python3`
+
+hipcc -std=c++17 test_hip.cc -o /tmp/test_hip
+/tmp/test_hip
 
 PYTHON_VERSION=`python3 -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')"`
 export TF_PYTHON_VERSION=$PYTHON_VERSION
@@ -75,7 +77,6 @@ if [ -f /usertools/rocm.bazelrc ]; then
  			 --test_env=TF_NUM_INTEROP_THREADS=16 \
 			 --test_env=TF_NUM_INTRAOP_THREADS=16 \
 			 --test_env=XLA_FLAGS="--xla_gpu_force_compilation_parallelism=16" \
-			 --test_env=HIP_VISIBLE_DEVICES=1 \
              --test_env=TF_TESTS_PER_GPU=$TF_TESTS_PER_GPU \
              --test_env=TF_GPU_COUNT=$TF_GPU_COUNT
 			  @local_xla//xla/tests/...
@@ -99,7 +100,6 @@ else
 		 --test_env=TF_NUM_INTEROP_THREADS=16 \
  		 --test_env=TF_NUM_INTRAOP_THREADS=16 \
 		 --test_env=XLA_FLAGS="--xla_gpu_force_compilation_parallelism=16" \
-		 --test_env=HIP_VISIBLE_DEVICES=1 \
 	      --action_env=OPENBLAS_CORETYPE=Haswell \
         --action_env=TF_ENABLE_ONEDNN_OPTS=0 \
 	      --test_timeout 920,2400,7200,9600 \

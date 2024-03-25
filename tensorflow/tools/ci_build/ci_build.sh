@@ -162,6 +162,7 @@ ${DOCKER_BINARY} pull ${DOCKER_IMG_NAME}
 # Run the command inside the container.
 echo "Running '${COMMAND[*]}' inside ${DOCKER_IMG_NAME}..."
 mkdir -p ${WORKSPACE}/bazel-ci_build-cache
+mkdir -p ${WORKSPACE}/tf
 # By default we cleanup - remove the container once it finish running (--rm)
 # and share the PID namespace (--pid=host) so the process inside does not have
 # pid 1 and SIGKILL is propagated to the process inside (jenkins can kill it).
@@ -174,6 +175,7 @@ ${DOCKER_BINARY} run --rm --name ${CONTAINER_NAME} --pid=host \
     -e "CI_BUILD_GID=$(id -g)" \
     -e "CI_TENSORFLOW_SUBMODULE_PATH=${CI_TENSORFLOW_SUBMODULE_PATH}" \
     ${CI_BUILD_USER_FORCE_BADNAME_ENV} \
+    -v ${WORKSPACE}/tf:/tf \
     -v ${WORKSPACE}:/workspace \
     -w /workspace \
     ${GPU_EXTRA_PARAMS} \

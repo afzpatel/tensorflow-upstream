@@ -47,6 +47,8 @@ fi
 # Run configure.
 export PYTHON_BIN_PATH=`which python3`
 
+ls -al /opt/rocm/bin/
+du -h /opt/rocm/
 hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
 /tmp/test_hip
 

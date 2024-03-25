@@ -52,6 +52,8 @@ export TF_PYTHON_VERSION=$PYTHON_VERSION
 export TF_NEED_ROCM=1
 export ROCM_PATH=$ROCM_INSTALL_DIR
 
+ls -al /opt/rocm/bin/
+du -h /opt/rocm/
 hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
 /tmp/test_hip
 

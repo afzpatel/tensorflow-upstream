@@ -139,6 +139,7 @@ echo "BUILD_TAG: ${BUILD_TAG}"
 echo "  (docker container name will be ${DOCKER_IMG_NAME})"
 echo ""
 
+CONTAINER_NAME=${DOCKER_IMG_NAME}
 DOCKER_IMG_NAME="docker.io/rocm/tensorflow-build:latest-focal-python3.9-rocm6.0.2"
 ${DOCKER_BINARY} pull ${DOCKER_IMG_NAME}
 
@@ -164,7 +165,7 @@ mkdir -p ${WORKSPACE}/bazel-ci_build-cache
 # By default we cleanup - remove the container once it finish running (--rm)
 # and share the PID namespace (--pid=host) so the process inside does not have
 # pid 1 and SIGKILL is propagated to the process inside (jenkins can kill it).
-${DOCKER_BINARY} run --rm --name ${DOCKER_IMG_NAME} --pid=host \
+${DOCKER_BINARY} run --rm --name ${CONTAINER_NAME} --pid=host \
     -v ${WORKSPACE}/bazel-ci_build-cache:${WORKSPACE}/bazel-ci_build-cache \
     -e "CI_BUILD_HOME=${WORKSPACE}/bazel-ci_build-cache" \
     -e "CI_BUILD_USER=$(id -u -n)" \

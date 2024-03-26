@@ -52,11 +52,14 @@ export TF_PYTHON_VERSION=$PYTHON_VERSION
 export TF_NEED_ROCM=1
 export ROCM_PATH=$ROCM_INSTALL_DIR
 
-ls -al /opt/rocm/bin/
-du -h /opt/rocm/
-#hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
-/opt/rocm/llvm/bin/clang -x hip -std=c++17 test_hip.cc -lstdc++ --hip-link -o /tmp/test_hip --rocm-path=/opt/rocm-6.0.2
-/tmp/test_hip
+#ls -al /opt/rocm/bin/
+#du -h /opt/rocm/
+hipcc -std=c++17 test_hip.cc -o /tmp/test_hip --rocm-path=/opt/rocm/
+#/opt/rocm/llvm/bin/clang -x hip -std=c++17 test_hip.cc -lstdc++ --hip-link -o /tmp/test_hip --rocm-path=/opt/rocm-6.0.2
+pushd /tmp
+chmod +x test_hip
+./test_hip
+popd
 
 if [ -f /usertools/rocm.bazelrc ]; then
 	# Use the bazelrc files in /usertools if available

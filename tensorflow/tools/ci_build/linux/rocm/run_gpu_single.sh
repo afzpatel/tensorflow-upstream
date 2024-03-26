@@ -70,6 +70,7 @@ if [ -f /usertools/rocm.bazelrc ]; then
              --config=sigbuild_local_cache \
              --config=rocm \
              --config=pycpp \
+			 --test_output=errors \
              --action_env=OPENBLAS_CORETYPE=Haswell \
              --action_env=TF_PYTHON_VERSION=$PYTHON_VERSION \
              --action_env=TF_ENABLE_ONEDNN_OPTS=0 \

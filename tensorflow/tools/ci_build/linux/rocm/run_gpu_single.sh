@@ -63,6 +63,7 @@ export ROCM_PATH=$ROCM_INSTALL_DIR
 
 if [ -f /usertools/rocm.bazelrc ]; then
 	# Use the bazelrc files in /usertools if available
+echo "Running XLA tests!"
 	bazel \
 	     --bazelrc=/usertools/rocm.bazelrc \
              test \
@@ -72,7 +73,6 @@ if [ -f /usertools/rocm.bazelrc ]; then
 	     --local_test_jobs=${N_TEST_JOBS} \
              --config=sigbuild_local_cache \
              --config=rocm \
-             --config=pycpp \
 			 --test_output=errors \
              --action_env=OPENBLAS_CORETYPE=Haswell \
              --action_env=TF_PYTHON_VERSION=$PYTHON_VERSION \

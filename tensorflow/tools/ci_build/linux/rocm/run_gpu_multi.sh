@@ -72,7 +72,6 @@ if [ -f /usertools/rocm.bazelrc ]; then
 	     --local_test_jobs=${N_TEST_JOBS} \
              --config=sigbuild_local_cache \
              --config=rocm \
-             --config=pycpp \
 			 --test_output=errors \
              --action_env=OPENBLAS_CORETYPE=Haswell \
              --action_env=TF_PYTHON_VERSION=$PYTHON_VERSION \

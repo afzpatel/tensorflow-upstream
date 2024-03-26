@@ -10,10 +10,12 @@
 //#include "common/example_utils.hpp"
 #include <hip/hip_runtime.h>
 
-#define VLOG(x) std::cerr << x
+#define VLOG(x) std::cout << x
 
 #define CHK(x) if(auto res = (x); res != hipSuccess) { \
-  throw std::runtime_error(std::to_string(__LINE__) + " failed!"); \
+  throw std::runtime_error("Line " + std::to_string(__LINE__) + \
+      " failed with " + std::string(hipGetErrorString(res)) + \
+      " code: " + std::to_string(res)); \
 }
 
 int main() try 
@@ -47,6 +49,8 @@ int main() try
     VLOG("v = " << v << '\n');
   }
   VLOG("================================================\n");
+  std::cerr << "Program finished" << std::endl;
+  std::cout << "Program finished" << std::endl;
 }
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());

@@ -556,7 +556,7 @@ void RocmApiCallbackImpl::AddNormalMemcpyEventUponApiExit(
     missing:
       device_id(partially, have only for async), context_id,
     memcpy_info.kind(CUPTI puts CUPTI_ACTIVITY_MEMCPY_KIND_UNKNOWN),
-      memcpy_info.destenation(partially, only for async)( CUPTI puts device_id),
+      memcpy_info.destination(partially, only for async)( CUPTI puts device_id),
 
     extra:
       domain, name,
@@ -577,7 +577,7 @@ void RocmApiCallbackImpl::AddNormalMemcpyEventUponApiExit(
   all api calls with HipMemcpy(+Async) to carry-on this generality.
   We also assume that if we want to copy data BETWEEN devices, we do not use
   hipMemcpy(+Async) or hipMemcpyDtoD(+Async) as we explicitly always set the
-  destenation as the source device id). Ultimately, to figure out the actual
+  destination as the source device id). Ultimately, to figure out the actual
   device we can use hipPointerGetAttributes but we do not do that now .In the
   other words, we assume we use hipMemcpyPeer to achieve the copy between
   devices.

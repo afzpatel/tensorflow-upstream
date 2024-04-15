@@ -2,25 +2,8 @@
 #   GPU-platform specific StreamExecutor support code.
 
 load(
-    "//xla/tests:build_defs.bzl",
-    "xla_test",
-)
-load(
     "@local_config_cuda//cuda:build_defs.bzl",
     "if_cuda",
-)
-load(
-    "//xla:xla.bzl",
-    "xla_cc_test",
-)
-load(
-    "//xla/service/gpu:build_defs.bzl",
-    "gpu_kernel_library",
-)
-load(
-    "//xla/stream_executor:build_defs.bzl",
-    "gpu_only_cc_library",
-    "if_gpu_is_configured",
 )
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
@@ -46,6 +29,23 @@ load(
 load(
     "@local_tsl//tsl/platform/default:cuda_build_defs.bzl",
     "if_cuda_is_configured",
+)
+load(
+    "//xla:xla.bzl",
+    "xla_cc_test",
+)
+load(
+    "//xla/service/gpu:build_defs.bzl",
+    "gpu_kernel_library",
+)
+load(
+    "//xla/stream_executor:build_defs.bzl",
+    "gpu_only_cc_library",
+    "if_gpu_is_configured",
+)
+load(
+    "//xla/tests:build_defs.bzl",
+    "xla_test",
 )
 
 package(
@@ -445,6 +445,8 @@ gpu_only_cc_library(
         "//xla/stream_executor/cuda:ptx_compiler",
         "//xla/stream_executor/cuda:ptx_compiler_support",
         "//xla/stream_executor/platform",
+        "//xla/tsl/util:env_var",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
@@ -589,6 +591,7 @@ tsl_gpu_library(
     deps = [
         ":gpu_init_impl",
         "//xla/stream_executor:stream_executor_headers",
+        "//xla/tsl/util:env_var",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/strings",
@@ -596,7 +599,6 @@ tsl_gpu_library(
         "@local_tsl//tsl/framework:device_id",
         "@local_tsl//tsl/platform:logging",
         "@local_tsl//tsl/platform:mutex",
-        "@local_tsl//tsl/util:env_var",
     ],
 )
 

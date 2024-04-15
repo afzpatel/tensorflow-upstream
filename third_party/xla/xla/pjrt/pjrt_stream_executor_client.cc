@@ -103,6 +103,7 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/pjrt/distributed/protocol.pb.h"
 #include "xla/pjrt/event_pool.h"
+#include "xla/pjrt/host_callback.h"
 #include "xla/pjrt/local_device_state.h"
 #include "xla/pjrt/metrics.h"
 #include "xla/pjrt/mlir_to_hlo.h"
@@ -850,8 +851,10 @@ PjRtStreamExecutorClient::BufferFromHostBuffer(
     TF_ASSIGN_OR_RETURN(transpose, transpose_cache_.GetOrCreate(options));
   }
 
+  bool should_pack =
+      primitive_util::Is4BitType(type) && transfer_manager->PackSubbyteTypes();
   int64_t packed_size;
-  if (primitive_util::Is4BitType(type)) {
+  if (should_pack) {
     packed_size = CeilOfRatio<int64_t>(size, 2);
   } else {
     packed_size = size;
@@ -883,14 +886,14 @@ PjRtStreamExecutorClient::BufferFromHostBuffer(
   if (host_buffer_semantics == HostBufferSemantics::kImmutableOnlyDuringCall) {
     if (transpose) {
       transpose->Execute(data, staging_buffer.get());
-      if (primitive_util::Is4BitType(type)) {
+      if (should_pack) {
         PackInt4(absl::MakeConstSpan(
                      static_cast<const char*>(staging_buffer.get()), size),
                  absl::MakeSpan(static_cast<char*>(staging_buffer.get()),
                                 packed_size));
       }
     } else {
-      if (primitive_util::Is4BitType(type)) {
+      if (should_pack) {
         PackInt4(absl::MakeConstSpan(static_cast<const char*>(data), size),
                  absl::MakeSpan(static_cast<char*>(staging_buffer.get()),
                                 packed_size));
@@ -913,7 +916,7 @@ PjRtStreamExecutorClient::BufferFromHostBuffer(
   auto transfer_h2d =
       [local_client = client(), transfer_manager, local_device, data, size,
        type, packed_size, movable_device_buffer{device_buffer.ToClosure()},
-       device_shape, py_buffer{py_buffer.get()},
+       device_shape, should_pack, py_buffer{py_buffer.get()},
        on_device_shape{py_buffer->on_device_shape()},
        staging_buffer{std::move(staging_buffer)},
        on_done_with_host_buffer =
@@ -942,7 +945,7 @@ PjRtStreamExecutorClient::BufferFromHostBuffer(
               HostBufferSemantics::kImmutableOnlyDuringCall) {
             if (transpose) {
               transpose->Execute(data, staging_buffer.get());
-              if (primitive_util::Is4BitType(type)) {
+              if (should_pack) {
                 PackInt4(
                     absl::MakeConstSpan(
                         static_cast<const char*>(staging_buffer.get()), size),
@@ -950,7 +953,7 @@ PjRtStreamExecutorClient::BufferFromHostBuffer(
                                    packed_size));
               }
             } else {
-              if (primitive_util::Is4BitType(type)) {
+              if (should_pack) {
                 PackInt4(
                     absl::MakeConstSpan(static_cast<const char*>(data), size),
                     absl::MakeSpan(static_cast<char*>(staging_buffer.get()),
@@ -1623,6 +1626,29 @@ StatusOr<size_t> PjRtStreamExecutorBuffer::GetOnDeviceSizeInBytes() const {
 PjRtFuture<Status> PjRtStreamExecutorBuffer::CopyRawToHost(
     void* dst, int64_t offset, int64_t transfer_size) {
   return client_->CopyRawSubBufferToHost(this, dst, offset, transfer_size);
+}
+
+PjRtFuture<Status> PjRtStreamExecutorBuffer::CopyRawToHostFuture(
+    PjRtFuture<StatusOr<void*>> dst, int64_t offset, int64_t transfer_size) {
+  auto promise = PjRtFuture<Status>::CreatePromise();
+  dst.OnReady([this, promise, offset,
+               transfer_size](absl::StatusOr<void*> dst) mutable {
+    if (dst.ok()) {
+      // Trampoline through a thread pool since some device types (e.g., GPUs)
+      // do not allow calling D2H inside the callback's context.
+      client_->thread_pool()->Schedule(
+          [this, dst = *dst, offset, transfer_size,
+           promise = std::move(promise)]() mutable {
+            CopyRawToHost(dst, offset, transfer_size)
+                .OnReady([promise = std::move(promise)](Status status) mutable {
+                  promise.Set(status);
+                });
+          });
+    } else {
+      promise.Set(dst.status());
+    }
+  });
+  return PjRtFuture<Status>(std::move(promise));
 }
 
 StatusOr<ShapedBuffer> PjRtStreamExecutorBuffer::AsShapedBuffer() const {
@@ -2873,7 +2899,7 @@ PjRtStreamExecutorLoadedExecutable::Execute(
           << " num_partitions=" << num_partitions()
           << " num_addressable_devices=" << num_addressable_devices;
   std::vector<StatusOr<Result>> results(num_addressable_devices);
-  if (num_addressable_devices == 1) {
+  if (num_addressable_devices == 1 && !ThisThreadIsInsideHostCallback()) {
     // Fast-path if there is only one device — run the computation on the
     // current thread.
     const int replica = addressable_device_logical_ids_[0].replica;

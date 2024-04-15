@@ -34,6 +34,11 @@ auto OptionalConvert(Pattern pattern) {
   return m::AnyOf<HloInstruction>(m::Convert(pattern), std::move(pattern));
 }
 
+inline auto OneDnnConvertibleInstr(HloInstruction** instr) {
+  return m::AnyOf<HloInstruction>(m::CustomCall(instr, {"__onednn$layernorm"}),
+                                  m::CustomCall(instr, {"__onednn$softmax"}));
+}
+
 HloInstruction* FindLayerNormScale(HloInstruction* instr) {
   HloInstruction* scale = nullptr;
   auto scalePattern = m::Multiply().WithBinaryOperandsAnyOrder(
@@ -402,10 +407,30 @@ class OneDnnOpsRewriterVisitor : public DfsHloRewriteVisitor {
     if (!found_ln) return OkStatus();
 
     const Shape& src_shape = src->shape();
+    auto scale_type = scale->shape().element_type();
+    auto bias_type = bias->shape().element_type();
+    HloInstruction* scale_operand = scale;
+    HloInstruction* bias_operand = bias;
+
+    // oneDNN requires scale and shift float32
+    if ((scale_type == PrimitiveType::BF16) ||
+        (scale_type == PrimitiveType::F16)) {
+      scale_operand = instr->AddInstruction(HloInstruction::CreateConvert(
+          ShapeUtil::ChangeElementType(scale->shape(), PrimitiveType::F32),
+          scale));
+    }
+
+    if ((bias_type == PrimitiveType::BF16) ||
+        (bias_type == PrimitiveType::F16)) {
+      bias_operand = instr->AddInstruction(HloInstruction::CreateConvert(
+          ShapeUtil::ChangeElementType(bias->shape(), PrimitiveType::F32),
+          bias));
+    }
 
     HloInstruction* ln_call =
         instr->AddInstruction(HloInstruction::CreateCustomCall(
-            src_shape, {src, scale, bias}, "__onednn$layernorm"));
+            src_shape, {src, scale_operand, bias_operand},
+            "__onednn$layernorm"));
     BackendConfig backend_config;
     OneDnnLayerNormConfig* ln_config =
         backend_config.mutable_onednn_layer_norm_config();
@@ -424,15 +449,13 @@ class OneDnnOpsRewriterVisitor : public DfsHloRewriteVisitor {
   }
 
   Status HandleConvert(HloInstruction* instr) override {
-    HloInstruction* ln_instr;
+    HloInstruction* custom_call;
     HloInstruction* convert_instr;
     auto pattern =
         m::Op(&convert_instr)
             .WithOpcode(HloOpcode::kConvert)
-            .WithOperand(0, m::Op(&ln_instr)
+            .WithOperand(0, OneDnnConvertibleInstr(&custom_call)
                                 .WithOneUser()
-                                .WithOpcode(HloOpcode::kCustomCall)
-                                .WithCustomCallTarget({"__onednn$layernorm"})
                                 .WithElementType(PrimitiveType::F32));
 
     if (!IsSupportedType(instr->shape().element_type())) return OkStatus();
@@ -448,11 +471,11 @@ class OneDnnOpsRewriterVisitor : public DfsHloRewriteVisitor {
                                            instr->shape().element_type()),
               producer));
       absl::InlinedVector<HloInstruction*, 2> newoperands =
-          ln_instr->mutable_operands();
+          custom_call->mutable_operands();
       newoperands.at(0) = newinp;
-      HloInstruction* ln_call = instr->AddInstruction(
-          ln_instr->CloneWithNewOperands(instr->shape(), newoperands));
-      TF_RETURN_IF_ERROR(ReplaceInstruction(instr, ln_call));
+      HloInstruction* updated_call = instr->AddInstruction(
+          custom_call->CloneWithNewOperands(instr->shape(), newoperands));
+      TF_RETURN_IF_ERROR(ReplaceInstruction(instr, updated_call));
     }
 
     return OkStatus();

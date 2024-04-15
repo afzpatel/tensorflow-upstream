@@ -30,8 +30,8 @@ limitations under the License.
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/escaping.h"
 #include "absl/strings/string_view.h"
+#include "third_party/gpus/cudnn/cudnn_version.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_clone_context.h"
@@ -42,7 +42,6 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/primitive_util.h"
-#include "xla/service/gpu/autotuner_util.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/kernel_reuse_cache.h"
@@ -50,7 +49,6 @@ limitations under the License.
 #include "xla/service/gpu/triton_fusion_analysis.h"
 #include "xla/stream_executor/cuda/cuda_dnn.h"
 #include "xla/stream_executor/cuda/cudnn_frontend_helpers.h"
-#include "xla/stream_executor/stream_executor.h"
 #include "xla/util.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
@@ -110,6 +108,10 @@ inline std::optional<fe::PointwiseMode_t> GetElementwiseMode(
       return m::POW;
     case HloOpcode::kRsqrt:
       return m::RSQRT;
+#if CUDNN_VERSION >= 90100
+    case HloOpcode::kSelect:
+      return m::BINARY_SELECT;
+#endif  // CUDNN_VERSION
     case HloOpcode::kSin:
       return m::SIN;
     case HloOpcode::kSqrt:
@@ -157,7 +159,7 @@ int FusionLevel(const HloInstruction& hlo) {
 class GemmDimensionAdapter {
   explicit GemmDimensionAdapter(const HloDotInstruction& dot,
                                 TritonFusionAnalysis analysis)
-      : analysis_(std::move(analysis)), dot_(dot){};
+      : analysis_(std::move(analysis)), dot_(dot) {};
 
  public:
   const TritonFusionAnalysis analysis_;
@@ -381,8 +383,13 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
       } else if (hlo->operand_count() == 2) {
         hlo_to_cudnn[hlo] = graph.pointwise(operand(0), operand(1), attrs);
       } else if (hlo->operand_count() == 3) {
+        if (hlo->opcode() != HloOpcode::kSelect) {
+          VLOG(3) << "Unexpected ternary operation: " << hlo->ToString();
+          return std::nullopt;
+        }
+        // Operand order for select differs between HLO and cuDNN.
         hlo_to_cudnn[hlo] =
-            graph.pointwise(operand(0), operand(1), operand(2), attrs);
+            graph.pointwise(operand(1), operand(2), operand(0), attrs);
       } else {
         VLOG(3) << "Unimplemented elementwise operation.";
         return std::nullopt;
@@ -436,13 +443,13 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
 
 // Creates a cuDNN graph, queries cuDNN whether it is supported.
 absl::StatusOr<se::gpu::CudnnGraph> PrepareGraph(
-    const HloFusionInstruction& hlo, se::Stream& stream) {
+    se::dnn::DnnSupport& dnn_support, const HloFusionInstruction& hlo) {
   TF_ASSIGN_OR_RETURN(std::optional<se::gpu::CudnnGraph> graph,
                       HloFusionToCuDnnGraph(hlo));
   if (!graph.has_value()) {
     return absl::InternalError("Construction of cuDNN graph failed.");
   }
-  TF_ASSIGN_OR_RETURN(bool supported, graph->Prepare());
+  TF_ASSIGN_OR_RETURN(bool supported, graph->Prepare(dnn_support));
   if (!supported) {
     return absl::InternalError("cuDNN graph is not supported.");
   }
@@ -451,7 +458,10 @@ absl::StatusOr<se::gpu::CudnnGraph> PrepareGraph(
 
 class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
  public:
-  explicit CuDnnFusionVisitor(const AutotuneConfig& config) : config_(config) {}
+  explicit CuDnnFusionVisitor(
+      se::dnn::DnnSupport& dnn_support,
+      CuDnnFusionCompiler::BinaryMap& compilation_results)
+      : dnn_support_(dnn_support), compilation_results_(compilation_results) {}
 
   absl::Status HandleFusion(HloInstruction* hlo) override {
     TF_ASSIGN_OR_RETURN(auto gpu_config,
@@ -462,10 +472,6 @@ class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
     }
     int64_t plan_id = -1;
     if (fusion_backend_config.has_cudnn_fusion_config()) {
-      if (fusion_backend_config.cudnn_fusion_config().has_serialized_graph()) {
-        VLOG(4) << "Skipping already serialized " << hlo->ToShortString();
-        return absl::OkStatus();
-      }
       plan_id = fusion_backend_config.cudnn_fusion_config().plan_id();
     }
 
@@ -474,27 +480,25 @@ class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
 
     const std::string cache_key =
         GetComputationFingerprint(hlo->fused_instructions_computation(), {});
-    std::string& cache_entry = compilation_cache_[cache_key];
+    std::string& cache_entry = compilation_results_[cache_key];
     if (cache_entry.empty()) {
-      TF_ASSIGN_OR_RETURN(se::Stream * stream, config_.GetStream());
-
       TF_ASSIGN_OR_RETURN(
           se::gpu::CudnnGraph graph,
-          PrepareGraph(*DynCast<HloFusionInstruction>(hlo), *stream));
+          PrepareGraph(dnn_support_, *DynCast<HloFusionInstruction>(hlo)));
 
       if (plan_id >= 0) {
         // Build single plan with given ID.
         if (plan_id >= graph.Graph().get_execution_plan_count()) {
           return absl::InternalError("cuDNN graph plan does not exist.");
         }
-        TF_RETURN_IF_ERROR(graph.Build(plan_id));
+        TF_RETURN_IF_ERROR(graph.Build(dnn_support_, plan_id));
       } else {
         // Build plans one by one till first successful when no plan_id was
         // provided.
         for (plan_id = 0; plan_id < graph.Graph().get_execution_plan_count();
              ++plan_id) {
           VLOG(7) << "Trying plan ID " << plan_id;
-          if (graph.Build(plan_id).ok()) {
+          if (graph.Build(dnn_support_, plan_id).ok()) {
             VLOG(7) << "Successfully built plan ID " << plan_id;
             break;
           }
@@ -511,16 +515,15 @@ class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
 
       std::vector<uint8_t> serialized_graph;
       RETURN_IF_CUDNN_FRONTEND_ERROR(graph.Graph().serialize(serialized_graph));
-      cache_entry = absl::CEscape(
-          absl::string_view(reinterpret_cast<char*>(serialized_graph.data()),
-                            serialized_graph.size()));
+      cache_entry =
+          std::string(reinterpret_cast<char*>(serialized_graph.data()),
+                      serialized_graph.size());
     } else {
       VLOG(4) << "Cache hit.";
     }
     auto cudnn_config = gpu_config.mutable_fusion_backend_config()
                             ->mutable_cudnn_fusion_config();
     cudnn_config->set_plan_id(plan_id);
-    cudnn_config->set_serialized_graph(cache_entry);
     TF_RETURN_IF_ERROR(hlo->set_backend_config(gpu_config));
 
     MarkAsChanged();
@@ -528,9 +531,9 @@ class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
   }
 
  private:
-  AutotuneConfig config_;
+  se::dnn::DnnSupport& dnn_support_;
   // <HLO computation fingerprint, serialized compiled cuDNN graph>.
-  absl::flat_hash_map<std::string, std::string> compilation_cache_;
+  CuDnnFusionCompiler::BinaryMap& compilation_results_;
 };
 
 }  // namespace
@@ -539,13 +542,13 @@ absl::StatusOr<bool> CuDnnFusionCompiler::Run(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   XLA_SCOPED_LOGGING_TIMER("cuDNN fusion compiler");
-  return CuDnnFusionVisitor(config_).RunOnModule(module, execution_threads);
+  return CuDnnFusionVisitor(dnn_support_, compilation_results_)
+      .RunOnModule(module, execution_threads);
 }
 
 int CuDnnFusionCompiler::GetAvailablePlanCount(
-    const HloFusionInstruction& hlo) const {
-  se::Stream& stream = *config_.GetStream().value();
-  auto graph = PrepareGraph(hlo, stream);
+    se::StreamExecutor& stream_exec, const HloFusionInstruction& hlo) {
+  auto graph = PrepareGraph(*stream_exec.AsDnn(), hlo);
   if (!graph.ok()) {
     return 0;
   }

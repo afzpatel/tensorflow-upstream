@@ -64,7 +64,7 @@ class PyHostValue {
   Status CopyToHostAsync(std::optional<Shape>& dynamic_shape_holder,
                          ifrt::Array* ifrt_array);
 
-  StatusOr<nanobind::object> AsNumPyArray(
+  absl::StatusOr<nanobind::object> AsNumPyArray(
       std::optional<Shape>& dynamic_shape_holder, ifrt::Array* ifrt_array);
 
  private:
@@ -176,6 +176,10 @@ class PyArray : public nanobind::object {
 
   const nanobind::object& sharding() const { return GetStorage().sharding; }
 
+  absl::StatusOr<std::unique_ptr<PjRtLayout>> layout() {
+    return ifrt_array()->layout();
+  }
+
   bool committed() const { return GetStorage().committed; }
 
   const nanobind::object& npy_value() const { return GetStorage().npy_value; }
@@ -193,7 +197,7 @@ class PyArray : public nanobind::object {
 
   // Returns xla::InvalidArgument if the buffer has been deleted.
   // See `PjRtFuture` for the semantics of `IsReady` and `IsKnownReady`.
-  StatusOr<bool> IsReady() {
+  absl::StatusOr<bool> IsReady() {
     ifrt::Array* ifrt_array_ptr = ifrt_array();
     if (ifrt_array_ptr->IsDeleted()) {
       return InvalidArgument("Array has been deleted.");
@@ -245,7 +249,7 @@ class PyArray : public nanobind::object {
 
   nanobind::object arrays();
   Status set_arrays(nanobind::object obj);
-  StatusOr<PyArray> FullyReplicatedShard();
+  absl::StatusOr<PyArray> FullyReplicatedShard();
 
   int num_shards() const {
     ifrt::Array* ifrt_array_ptr = ifrt_array();
@@ -271,11 +275,11 @@ class PyArray : public nanobind::object {
 
   absl::Status BlockUntilResultStatusIsReady();
 
-  StatusOr<size_t> GetOnDeviceSizeInBytes();
-  StatusOr<nanobind::object> SingleDeviceArrayToNumpyArray();
+  absl::StatusOr<size_t> GetOnDeviceSizeInBytes();
+  absl::StatusOr<nanobind::object> SingleDeviceArrayToNumpyArray();
   Status CopySingleDeviceArrayToHostAsync();
   nanobind::dict CudaArrayInterface();
-  StatusOr<std::uintptr_t> UnsafeBufferPointer();
+  absl::StatusOr<std::uintptr_t> UnsafeBufferPointer();
 
   Status Delete();
 
@@ -283,10 +287,10 @@ class PyArray : public nanobind::object {
 
   PyArray Clone() const;
 
-  StatusOr<PyArray> CopyToDeviceWithSharding(ifrt::DeviceList devices,
-                                             nanobind::object dst_sharding);
+  absl::StatusOr<PyArray> CopyToDeviceWithSharding(
+      ifrt::DeviceList devices, nanobind::object dst_sharding);
 
-  static StatusOr<PyArray> BatchedDevicePut(
+  static absl::StatusOr<PyArray> BatchedDevicePut(
       nanobind::object aval, nanobind::object sharding,
       std::vector<nanobind::object> xs,
       absl::Span<const PyDevice* const> dst_devices, bool committed,
@@ -297,8 +301,8 @@ class PyArray : public nanobind::object {
       std::vector<nanobind::object> objs);
 
  private:
-  StatusOr<PyArray> FetchSingleShard(std::string_view api);
-  StatusOr<PyArray> AssertUnsharded(std::string_view api);
+  absl::StatusOr<PyArray> FetchSingleShard(std::string_view api);
+  absl::StatusOr<PyArray> AssertUnsharded(std::string_view api);
 
   void CheckAndRearrange();
 
@@ -334,7 +338,7 @@ class PyArrayResultHandler {
   std::vector<int64_t> shape_;
 };
 
-StatusOr<nanobind::object> CudaArrayInterfaceToBuffer(
+absl::StatusOr<nanobind::object> CudaArrayInterfaceToBuffer(
     const nanobind::dict& cai, nb_class_ptr<PyClient> cuda_client);
 
 }  // namespace xla

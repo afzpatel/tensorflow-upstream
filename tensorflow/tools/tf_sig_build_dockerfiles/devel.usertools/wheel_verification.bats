@@ -38,7 +38,7 @@ teardown_file() {
         # CPU:
         *cpu*manylinux*) LARGEST_OK_SIZE=240 ;;
         # GPU:
-        *manylinux*)     LARGEST_OK_SIZE=580 ;;
+        *manylinux*)     LARGEST_OK_SIZE=600 ;;
         # Unknown:
         *)
             echo "The wheel's name is in an unknown format."

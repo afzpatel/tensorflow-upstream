@@ -171,6 +171,11 @@ class RocmComputeCapability {
     return absl::c_count(kList, gfx_version()) != 0;
   }
 
+  bool gfx9_mi300_or_later() const {
+    static constexpr absl::string_view kList[] = {"gfx940", "gfx941", "gfx942"};
+    return absl::c_count(kList, gfx_version()) != 0;
+  }
+
   bool navi21() const { return gfx_version() == "gfx1030"; }
 
   bool navi31() const { return gfx_version() == "gfx1100"; }

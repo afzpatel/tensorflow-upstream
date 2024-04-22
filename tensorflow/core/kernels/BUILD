@@ -4290,6 +4290,7 @@ tf_kernel_library(
         ":bounds_check",
         ":conv_ops",
         ":ops_util",
+	"reduction_ops",
         "//tensorflow/core:core_cpu",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",

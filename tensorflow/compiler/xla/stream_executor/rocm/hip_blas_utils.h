@@ -23,6 +23,8 @@ limitations under the License.
 #include "tensorflow/tsl/platform/errors.h"
 #include "tensorflow/tsl/platform/status.h"
 
+#if TF_HIPBLASLT
+
 #include "rocm/rocm_config.h"
 #if TF_ROCM_VERSION < 60000
 #define hipDataType hipblasDatatype_t
@@ -54,5 +56,7 @@ hipblasOperation_t AsHipblasOperation(blas::Transpose trans);
 
 }  // namespace rocm
 }  // namespace stream_executor
+
+#endif // TF_HIPBLASLT
 
 #endif  // TENSORFLOW_COMPILER_XLA_STREAM_EXECUTOR_ROCM_HIP_BLAS_UTILS_H_

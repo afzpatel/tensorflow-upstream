@@ -19,6 +19,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/stream_executor/blas.h"
 #include "rocm/rocm_config.h"
 
+#if TF_HIPBLASLT
+
 namespace stream_executor {
 namespace rocm {
 
@@ -78,3 +80,4 @@ hipblasOperation_t AsHipblasOperation(blas::Transpose trans) {
 
 }  // namespace rocm
 }  // namespace stream_executor
+#endif // #TF_HIPBLASLT

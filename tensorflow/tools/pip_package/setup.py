@@ -47,7 +47,7 @@ from setuptools.dist import Distribution
 # result for pip.
 # Also update tensorflow/tensorflow.bzl and
 # tensorflow/core/public/version.h
-_VERSION = '2.15.0'
+_VERSION = '2.15.1'
 
 
 # We use the same setup.py for all tensorflow_* packages and for the nightly
@@ -89,7 +89,7 @@ REQUIRED_PACKAGES = [
     'google_pasta >= 0.1.1',
     'h5py >= 2.9.0',
     'libclang >= 13.0.0',
-    'ml_dtypes ~= 0.2.0',
+    'ml_dtypes ~= 0.3.1',
     'numpy >= 1.23.5, < 2.0.0',
     'opt_einsum >= 2.3.2',
     'packaging',
@@ -175,9 +175,6 @@ EXTRA_PACKAGES['and-cuda'] = [
     'nvidia-cusparse-cu12 == 12.1.2.141',
     'nvidia-nccl-cu12 == 2.16.5',
     'nvidia-nvjitlink-cu12 == 12.2.140',
-    'tensorrt == 8.6.1.post1',
-    'tensorrt-bindings == 8.6.1',
-    'tensorrt-libs == 8.6.1',
 ]
 
 DOCLINES = __doc__.split('\n')

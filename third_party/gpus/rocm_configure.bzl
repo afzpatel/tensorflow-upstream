@@ -190,6 +190,7 @@ def _rocm_include_path(repository_ctx, rocm_config):
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/12.0.0/include")
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/13.0.0/include")
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/14.0.0/include")
+    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/17/include")
 
     # Add rocrand and hiprand headers
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/rocrand/include")
@@ -240,6 +241,8 @@ def _rocm_include_path(repository_ctx, rocm_config):
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/hcc/compiler/lib/clang/14.0.0/include/")
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/hcc/lib/clang/14.0.0/include")
 
+    inc_dirs.append(rocm_config.rocm_toolkit_path + "/hcc/compiler/lib/clang/17/include/")
+    inc_dirs.append(rocm_config.rocm_toolkit_path + "/hcc/lib/clang/17/include")
 
     return inc_dirs
 
@@ -318,10 +321,10 @@ def _hipcc_is_hipclang(repository_ctx,rocm_config):
         if name in repository_ctx.os.environ:
             return "True"
 
-    # grep for "HIP_COMPILER=clang" in /opt/rocm/hip/lib/.hipInfo
+    # grep for "HIP_COMPILER=clang" in /opt/rocm/lib/.hipInfo
     grep_result = _execute(
         repository_ctx,
-        ["grep", "HIP_COMPILER=clang", rocm_config.rocm_toolkit_path + "/hip/lib/.hipInfo"],
+        ["grep", "HIP_COMPILER=clang", rocm_config.rocm_toolkit_path + "/lib/.hipInfo"],
         empty_stdout_fine = True,
     )
     result = grep_result.stdout.strip()
@@ -477,13 +480,13 @@ def _find_libs(repository_ctx, rocm_config):
             "rocblas",
             repository_ctx,
             cpu_value,
-            rocm_config.rocm_toolkit_path + "/rocblas",
+            rocm_config.rocm_toolkit_path + "/lib",
         ),
         "hipfft": _find_rocm_lib(
             "hipfft",
             repository_ctx,
             cpu_value,
-            rocm_config.rocm_toolkit_path + "/hipfft",
+            rocm_config.rocm_toolkit_path + "/lib",
         ),
         "hiprand": _find_rocm_lib(
             "hiprand",
@@ -495,13 +498,13 @@ def _find_libs(repository_ctx, rocm_config):
             "MIOpen",
             repository_ctx,
             cpu_value,
-            rocm_config.rocm_toolkit_path + "/miopen",
+            rocm_config.rocm_toolkit_path + "/lib",
         ),
         "rccl": _find_rocm_lib(
             "rccl",
             repository_ctx,
             cpu_value,
-            rocm_config.rocm_toolkit_path + "/rccl",
+            rocm_config.rocm_toolkit_path + "/lib",
         ),
     }
 
@@ -708,32 +711,7 @@ def _create_local_rocm_repository(repository_ctx):
             name = "rocm-include",
             src_dir = rocm_toolkit_path + "/include",
             out_dir = "rocm/include",
-            exceptions = [rocm_toolkit_path + "/include/gtest", 
-              rocm_toolkit_path + "/include/gmock"],
-        ),
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "hipfft-include",
-            src_dir = rocm_toolkit_path + "/hipfft/include",
-            out_dir = "rocm/include/hipfft",
-        ),
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "rocblas-include",
-            src_dir = rocm_toolkit_path + "/rocblas/include",
-            out_dir = "rocm/include/rocblas",
-        ),
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "miopen-include",
-            src_dir = rocm_toolkit_path + "/miopen/include",
-            out_dir = "rocm/include/miopen",
-        ),
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "rccl-include",
-            src_dir = rocm_toolkit_path + "/rccl/include",
-            out_dir = "rocm/include/rccl",
+            exceptions = ["gtest", "gmock"],
         ),
     ]
 
@@ -744,28 +722,11 @@ def _create_local_rocm_repository(repository_ctx):
     hiprand_include_softlink = repository_ctx.path(rocm_config.rocm_toolkit_path + "/include/hiprand")
     if not hiprand_include_softlink.exists:
         hiprand_include = '":hiprand-include",\n'
-        copy_rules.append(
-            make_copy_dir_rule(
-                repository_ctx,
-                name = "hiprand-include",
-                src_dir = rocm_toolkit_path + "/hiprand/include",
-                out_dir = "rocm/include/hiprand",
-            )
-        )
 
     rocrand_include = ""
     rocrand_include_softlink = repository_ctx.path(rocm_config.rocm_toolkit_path + "/include/rocrand")
     if not rocrand_include_softlink.exists:
         rocrand_include = '":rocrand-include",\n'
-        copy_rules.append(
-            make_copy_dir_rule(
-                repository_ctx,
-                name = "rocrand-include",
-                src_dir = rocm_toolkit_path + "/rocrand/include",
-                out_dir = "rocm/include/rocrand",
-            )
-        )
-
 
     rocm_libs = _find_libs(repository_ctx, rocm_config)
     rocm_lib_srcs = []
@@ -804,10 +765,6 @@ def _create_local_rocm_repository(repository_ctx):
             "%{rccl_lib}": rocm_libs["rccl"].file_name,
             "%{copy_rules}": "\n".join(copy_rules),
             "%{rocm_headers}": ('":rocm-include",\n' +
-                                '":hipfft-include",\n' +
-                                '":rocblas-include",\n' +
-                                '":miopen-include",\n' +
-                                '":rccl-include",\n' +
                                 hiprand_include +
                                 rocrand_include),
         },

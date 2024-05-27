@@ -141,8 +141,7 @@ DeviceProperties GetLocalGPUInfo(PlatformGpuId platform_gpu_id) {
   device.set_bandwidth(properties.memoryBusWidth / 8 *
                        properties.memoryClockRate * 2);
 
-  (*device.mutable_environment())["architecture"] =
-      strings::StrCat("gfx", properties.gcnArch);
+  (*device.mutable_environment())["architecture"] = properties.gcnArchName;
 #endif
 
   return device;

@@ -1119,7 +1119,7 @@ GpuDriver::ContextGetSharedMemConfig(GpuContext* context) {
   hipDeviceProp_t props;
   hipError_t result = tensorflow::wrap::hipGetDeviceProperties(&props, device);
   if (result == hipSuccess) {
-    *version = props.gcnArch;
+    *version = strtol(&props.gcnArchName[3], nullptr, 10);
     return port::Status::OK();
   }
   *version = 0;

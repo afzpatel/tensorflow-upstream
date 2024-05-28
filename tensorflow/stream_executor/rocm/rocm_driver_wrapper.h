@@ -121,6 +121,7 @@ namespace wrap {
   __macro(hipStreamQuery)                           \
   __macro(hipStreamSynchronize)                     \
   __macro(hipStreamWaitEvent)                       \
+  __macro(hipMallocManaged)                         \
 // clang-format on
 
 HIP_ROUTINE_EACH(STREAM_EXECUTOR_HIP_WRAP)

@@ -669,17 +669,32 @@ GpuDriver::ContextGetSharedMemConfig(GpuContext* context) {
 
 /* static */ void* GpuDriver::UnifiedMemoryAllocate(GpuContext* context,
                                                     uint64 bytes) {
-  ScopedActivateContext activated{context};
-
-  LOG(ERROR)
-      << "Feature not supported on ROCm platform (UnifiedMemoryAllocate)";
-  return nullptr;
+  ScopedActivateContext activation{context};
+  hipDeviceptr_t result = 0;
+  hipError_t res = tensorflow::wrap::hipMallocManaged(&result, bytes, hipMemAttachGlobal);
+  if (res != hipSuccess) {
+    LOG(ERROR) << "failed to alloc " << bytes
+               << " bytes unified memory; result: " << ToString(res);
+    return nullptr;
+  }
+  void* ptr = reinterpret_cast<void*>(result);
+  VLOG(2) << "allocated " << ptr << " for device " << context->device_ordinal()
+          << " of " << bytes << " bytes in unified memory";
+  return ptr;
 }
 
 /* static */ void GpuDriver::UnifiedMemoryDeallocate(GpuContext* context,
                                                      void* location) {
-  LOG(ERROR)
-      << "Feature not supported on ROCm platform (UnifiedMemoryDeallocate)";
+  ScopedActivateContext activation{context};
+  hipDeviceptr_t pointer = absl::bit_cast<hipDeviceptr_t>(location);
+  hipError_t res = tensorflow::wrap::hipFree(pointer);
+  if (res != hipSuccess) {
+    LOG(ERROR) << "failed to free unified memory at " << location
+               << "; result: " << ToString(res);
+  } else {
+    VLOG(2) << "deallocated unified memory at " << location << " for device "
+            << context->device_ordinal();
+  }
 }
 
 /* static */ void* GpuDriver::HostAllocate(GpuContext* context, uint64 bytes) {

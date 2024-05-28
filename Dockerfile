@@ -29,8 +29,7 @@ RUN apt-get update --allow-insecure-repositories && apt-get install -y openjdk-8
 RUN cd ~ && rm -rf bazel*.sh && wget https://github.com/bazelbuild/bazel/releases/download/0.26.1/bazel-0.26.1-installer-linux-x86_64.sh && bash bazel*.sh && rm -rf ~/*.sh
 
 # Clone TF
-RUN cd ~ && git clone -b r1.15-mi308 https://github.com/fsx950223/tensorflow.git tensorflow
-# RUN cd ~ && git clone -b r1.15 https://github.com/ROCmSoftwarePlatform/tensorflow-upstream.git tensorflow
+RUN cd ~ && git clone -b r1.15-rocm61 https://github.com/ROCm/tensorflow-upstream.git tensorflow
 
 RUN ln -s /usr/bin/python3 /usr/bin/python
 

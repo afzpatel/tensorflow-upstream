@@ -39,4 +39,4 @@ RUN cd ~ && git clone https://github.com/tensorflow/models.git
 
 # TF/benchmarks with some workarounds for ImageNet
 RUN cd ~ && git clone -b cnn_tf_v1.15_compatible https://github.com/tensorflow/benchmarks.git
-WORKDIR ~
+WORKDIR $HOME

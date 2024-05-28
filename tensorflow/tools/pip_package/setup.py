@@ -55,18 +55,27 @@ REQUIRED_PACKAGES = [
     'astor >= 0.6.0',
     'backports.weakref >= 1.0rc1;python_version<"3.4"',
     'enum34 >= 1.1.6;python_version<"3.4"',
+    # functools comes with python3, need to install the backport for python2
+    'functools32 >= 3.2.3;python_version<"3"',
     'gast == 0.2.2',
     'google_pasta >= 0.1.6',
     'keras_applications >= 1.0.8',
     'keras_preprocessing >= 1.0.5',
-    'numpy >= 1.16.0, < 2.0',
+    # mock comes with unittest.mock for python3, need to install for python2
+    'mock >= 2.0.0;python_version<"3"',
+    'numpy >= 1.16.0, < 1.19.0',
     'opt_einsum >= 2.3.2',
     'six >= 1.10.0',
     'protobuf ~= 3.20',
     'tensorboard >= 1.15.0, < 1.16.0',
     'tensorflow-estimator == 1.15.1',
     'termcolor >= 1.1.0',
+    # python3 requires wheel 0.26
+    'wheel >= 0.26;python_version>="3"',
+    'wheel;python_version<"3"',
     'wrapt >= 1.11.1',
+    # Pin h5py to at most 2.10.0 as newer versions break old keras tests
+    'h5py <= 2.10.0',
 ]
 
 if sys.byteorder == 'little':
@@ -81,16 +90,6 @@ if '--project_name' in sys.argv:
   project_name = sys.argv[project_name_idx + 1]
   sys.argv.remove('--project_name')
   sys.argv.pop(project_name_idx)
-
-# python3 requires wheel 0.26
-if sys.version_info.major == 3:
-  REQUIRED_PACKAGES.append('wheel >= 0.26')
-else:
-  REQUIRED_PACKAGES.append('wheel')
-  # mock comes with unittest.mock for python3, need to install for python2
-  REQUIRED_PACKAGES.append('mock >= 2.0.0')
-  # functools comes with python3, need to install the backport for python2
-  REQUIRED_PACKAGES.append('functools32 >= 3.2.3')
 
 # tf-nightly should depend on tb-nightly
 if 'tf_nightly' in project_name:

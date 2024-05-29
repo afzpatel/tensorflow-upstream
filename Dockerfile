@@ -32,11 +32,10 @@ RUN cd ~ && rm -rf bazel*.sh && wget https://github.com/bazelbuild/bazel/release
 RUN cd ~ && git clone -b r1.15-rocm61 https://github.com/ROCm/tensorflow-upstream.git tensorflow
 
 RUN ln -s /usr/bin/python3 /usr/bin/python
+WORKDIR $HOME
 
-RUN cd ~/tensorflow && bash build_rocm_python3 && rm -rf ~/.cache
-
-RUN cd ~ && git clone https://github.com/tensorflow/models.git
+RUN git clone https://github.com/tensorflow/models.git
 
 # TF/benchmarks with some workarounds for ImageNet
-RUN cd ~ && git clone -b cnn_tf_v1.15_compatible https://github.com/tensorflow/benchmarks.git
-WORKDIR $HOME
+RUN git clone -b cnn_tf_v1.15_compatible https://github.com/tensorflow/benchmarks.git
+

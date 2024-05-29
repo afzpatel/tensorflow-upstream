@@ -26,13 +26,9 @@ teardown_file() {
     rm -rf /tf/venv
 }
 
-@test "Wheel is manylinux2014 (manylinux_2_17) compliant (TPU wheel is manylinux_2_27 compliant)" {
+@test "Wheel is manylinux_2_28 compliant" {
     python3 -m auditwheel show "$TF_WHEEL" > audit.txt
-    if [[ "$TF_WHEEL" =~ .*_tpu.* ]]; then
-        grep --quiet 'This constrains the platform tag to "manylinux_2_27_x86_64"' audit.txt
-    else
-        grep --quiet 'This constrains the platform tag to "manylinux_2_17_x86_64"' audit.txt
-    fi
+    grep --quiet 'This constrains the platform tag to "manylinux_2_28_x86_64"' audit.txt
 }
 
 @test "Wheel conforms to upstream size limitations" {

@@ -364,6 +364,7 @@ tf_kernel_library(
     deps = [
         "//tensorflow/core:framework",
         "//third_party/eigen3",
+        "@com_google_protobuf//:protobuf",
     ],
 )
 

@@ -192,7 +192,7 @@ def _rocm_include_path(repository_ctx, rocm_config):
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/14.0.0/include")
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/15.0.0/include")
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/15.0.0/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/17.0.0/include")
+    inc_dirs.append(rocm_config.rocm_toolkit_path + "/lib/llvm/lib/clang/17/include")
 
     # Add rocrand and hiprand headers
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/rocrand/include")
@@ -810,7 +810,7 @@ def _create_local_rocm_repository(repository_ctx):
 
     rocm_defines["%{unfiltered_compile_flags}"] = to_list_of_strings([
         "-DTENSORFLOW_USE_ROCM=1",
-        "-D__HIP_PLATFORM_HCC__",
+        "-D__HIP_PLATFORM_AMD__",
         "-DEIGEN_USE_HIP",
     ] + _if_hipcc_is_hipclang(repository_ctx, rocm_config, [
         #

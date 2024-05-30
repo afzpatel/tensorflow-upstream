@@ -60,16 +60,18 @@ else
   pip3 install --upgrade numpy==1.14.5
 fi
 
-#pip3 install scipy==1.1.0
+pip3 install scipy==1.1.0
 
 #pip3 install scikit-learn==0.18.1
+pip3 install scikit-learn==0.20.4
 
 # pandas required by `inflow`
 #pip3 install pandas==0.19.2
+pip3 install pandas==0.23.4
 
 # Benchmark tests require the following:
-#pip3 install psutil
-#pip3 install py-cpuinfo
+pip3 install psutil
+pip3 install py-cpuinfo
 
 # pylint tests require the following:
 pip3 install pylint==1.6.4
@@ -91,10 +93,10 @@ pip3 install --upgrade termcolor
 # Keras
 pip3 install keras_applications==1.0.8 --no-deps
 pip3 install keras_preprocessing==1.0.5 --no-deps
-#pip3 install --upgrade h5py==2.8.0 --no-deps
+pip3 install --upgrade h5py==2.8.0 --no-deps
 
 # Estimator
-#pip3 install tf-estimator-nightly==2.1.0.dev2020012309 --no-deps
+pip3 install tf-estimator-nightly==2.1.0.dev2020012309 --no-deps
 pip3 install tensorflow-estimator==1.15 --no-deps
 
 # Argparse

@@ -108,6 +108,7 @@ COPY install/*.sh /install/
 ARG DEBIAN_FRONTEND=noninteractive
 RUN /install/install_bootstrap_deb_packages.sh
 RUN /install/install_deb_packages.sh
+RUN /install/build-py-3.7.sh
 RUN /install/install_pip_packages.sh
 RUN /install/install_bazel.sh
 RUN /install/install_golang.sh

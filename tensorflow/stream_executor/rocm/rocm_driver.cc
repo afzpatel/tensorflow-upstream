@@ -1126,6 +1126,8 @@ GpuDriver::ContextGetSharedMemConfig(GpuContext* context) {
       amdgpu_version = tokens[0].substr(3);
     }
     *version = stoi(amdgpu_version);
+    if (*version == 90)
+	    *version=909;
     return port::Status::OK();
   }
   *version = 0;

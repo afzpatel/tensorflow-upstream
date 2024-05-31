@@ -213,6 +213,8 @@ static bool IsDeviceSupported(se::StreamExecutor* executor) {
   } else if (executor->platform()->id() == se::rocm::kROCmPlatformId) {
     int isa_version = 0;
     if (description.rocm_amdgpu_isa_version(&isa_version)) {
+      if (isa_version == 90)
+	      isa_version = 909;
       if (isa_version < kMinAMDGPUISAVersion) {
         LOG(INFO) << "StreamExecutor ROCM device ("
                   << executor->device_ordinal() << ") is of "

@@ -119,8 +119,8 @@ GpuVersion AMDGPUCompiler::GetGpuVersion(se::StreamExecutor* stream_exec) {
   if (!stream_exec->GetDeviceDescription().rocm_amdgpu_isa_version(
           &isa_version)) {
     LOG(WARNING)
-        << "Couldn't get AMDGPU ISA version for device; assuming gfx803.";
-    isa_version = 803;
+        << "Couldn't get AMDGPU ISA version for device; assuming gfx90a.";
+    isa_version = 906;
   }
 
   return isa_version;

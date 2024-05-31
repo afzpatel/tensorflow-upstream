@@ -18,21 +18,21 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_MLIR_TENSORFLOW_IR_TF_TYPES_H_
 #define TENSORFLOW_COMPILER_MLIR_TENSORFLOW_IR_TF_TYPES_H_
 
-#include "mlir/IR/Diagnostics.h"  // TF:local_config_mlir
-#include "mlir/IR/Location.h"  // TF:local_config_mlir
-#include "mlir/IR/StandardTypes.h"  // TF:local_config_mlir
-#include "mlir/IR/Types.h"  // TF:local_config_mlir
+#if 1
+
+// 1.x version, which does not compile, because the concept of Type::Kind is no longer present in MLIR
 
 namespace mlir {
 namespace TF {
 
 namespace TensorFlowTypes {
 // List of supported TensorFlowType kinds, necessary for isa/dyn_cast.
+
 enum Kind {
-  FIRST_USED_TENSORFLOW_TYPE = Type::FIRST_TENSORFLOW_TYPE,
+  FIRST_USED_TENSORFLOW_TYPE,
 #define HANDLE_TF_TYPE(tftype, enumerant, name) enumerant,
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.def"
-  LAST_USED_TENSORFLOW_TYPE,
+  LAST_USED_TENSORFLOW_TYPE = FIRST_USED_TENSORFLOW_TYPE + 0xff,
 };
 }  // namespace TensorFlowTypes
 
@@ -40,12 +40,13 @@ enum Kind {
 class TensorFlowType : public Type {
  public:
   using Type::Type;
-
+#if 0
   // Support method to enable LLVM-style type casting.
   static bool classof(Type type) {
     return type.getKind() >= Type::FIRST_TENSORFLOW_TYPE &&
            type.getKind() <= TensorFlowTypes::LAST_USED_TENSORFLOW_TYPE;
   }
+#endif  
 };
 
 // Returns true if the specified type is a valid TensorFlow element type.
@@ -70,9 +71,9 @@ namespace detail {
 //   - `static unsigned getTypeKind()` that returns the (fixed) kind of the
 //     type.
 template <typename Derived>
-class TensorFlowTypeImpl : public Type::TypeBase<Derived, TensorFlowType> {
+class TensorFlowTypeImpl : public Type::TypeBase<Derived, TensorFlowType, TypeStorage> {
  public:
-  using Base = typename Type::TypeBase<Derived, TensorFlowType>;
+  using Base = typename Type::TypeBase<Derived, TensorFlowType, TypeStorage>;
   using TFBase = TensorFlowTypeImpl<Derived>;
   using Base::Base;
 
@@ -148,7 +149,7 @@ class VariantType
   static bool kindof(unsigned kind) { return kind == TensorFlowTypes::VARIANT; }
 
   static LogicalResult verifyConstructionInvariants(
-      llvm::Optional<Location> loc, MLIRContext* context,
+      std::optional<Location> loc, MLIRContext* context,
       ArrayRef<TensorType> subtypes) {
     // Each of the subtypes should be a valid TensorFlow type.
     for (TensorType subtype : subtypes) {
@@ -167,5 +168,108 @@ class VariantType
 
 }  // end namespace TF
 }  // end namespace mlir
+
+#else
+
+// 2.x version, depends on tensorflow/core/ir/... (which is absent from 1.x)
+
+#include "tensorflow/core/ir/types/dialect.h"
+
+namespace mlir {
+namespace TF {
+
+// This all moved under tensorflow/core/ir/types and these using declaration are
+// to help with the transition.
+
+using ::mlir::tf_type::AreCastCompatible;          // NOLINT
+using ::mlir::tf_type::ArraysAreCastCompatible;    // NOLINT
+using ::mlir::tf_type::BroadcastCompatible;        // NOLINT
+using ::mlir::tf_type::DropRefType;                // NOLINT
+using ::mlir::tf_type::filter_resources;           // NOLINT
+using ::mlir::tf_type::GetCastCompatibleType;      // NOLINT
+using ::mlir::tf_type::HasCompatibleElementTypes;  // NOLINT
+using ::mlir::tf_type::IsValidTFTensorType;        // NOLINT
+using ::mlir::tf_type::OperandShapeIterator;       // NOLINT
+using ::mlir::tf_type::ResourceType;               // NOLINT
+using ::mlir::tf_type::ResultShapeIterator;        // NOLINT
+using ::mlir::tf_type::ResultShapeRange;           // NOLINT
+using ::mlir::tf_type::StringType;                 // NOLINT
+using ::mlir::tf_type::TensorFlowRefType;          // NOLINT
+using ::mlir::tf_type::TensorFlowType;             // NOLINT
+using ::mlir::tf_type::TensorFlowTypeWithSubtype;  // NOLINT
+using ::mlir::tf_type::VariantType;                // NOLINT
+
+#define HANDLE_TF_TYPE(tftype, enumerant, name) \
+  using tftype##Type = mlir::tf_type::tftype##Type;
+
+
+#ifdef HANDLE_TF_TYPE
+
+//             class, enumerant, name
+HANDLE_TF_TYPE(Qint8, QINT8, "qint8")
+HANDLE_TF_TYPE(Qint16, QINT16, "qint16")
+HANDLE_TF_TYPE(Qint32, QINT32, "qint32")
+HANDLE_TF_TYPE(Quint8, QUINT8, "quint8")
+HANDLE_TF_TYPE(Quint16, QUINT16, "quint16")
+HANDLE_TF_TYPE(String, STRING, "string")
+
+#ifndef HANDLE_CUSTOM_TF_TYPE
+#define HANDLE_CUSTOM_TF_TYPE(class, enumerant, name) \
+  HANDLE_TF_TYPE(class, enumerant, name)
+#endif
+HANDLE_CUSTOM_TF_TYPE(Resource, RESOURCE, "resource")
+HANDLE_CUSTOM_TF_TYPE(Variant, VARIANT, "variant")
+#undef HANDLE_CUSTOM_TF_TYPE
+
+// All ref types are listed below this line and FloatRef is the first ref type.
+// This helps in easily differentiating ref and non-ref types, and converting
+// a type to/from ref types.
+
+#ifndef HANDLE_TF_REF_TYPE
+#define HANDLE_TF_REF_TYPE(class, enumerant, name) \
+  HANDLE_TF_TYPE(class, enumerant, name)
+#endif
+HANDLE_TF_REF_TYPE(FloatRef, FLOAT_REF, "f32ref")
+HANDLE_TF_REF_TYPE(DoubleRef, DOUBLE_REF, "f64ref")
+HANDLE_TF_REF_TYPE(Uint4Ref, UINT4_REF, "uint4ref")
+HANDLE_TF_REF_TYPE(Int4Ref, INT4_REF, "int4ref")
+HANDLE_TF_REF_TYPE(Uint8Ref, UINT8_REF, "uint8ref")
+HANDLE_TF_REF_TYPE(Int8Ref, INT8_REF, "int8ref")
+HANDLE_TF_REF_TYPE(Uint16Ref, UINT16_REF, "uint16ref")
+HANDLE_TF_REF_TYPE(Int16Ref, INT16_REF, "int16ref")
+HANDLE_TF_REF_TYPE(Uint32Ref, UINT32_REF, "uint32ref")
+HANDLE_TF_REF_TYPE(Int32Ref, INT32_REF, "int32ref")
+HANDLE_TF_REF_TYPE(Uint64Ref, UINT64_REF, "uint64ref")
+HANDLE_TF_REF_TYPE(Int64Ref, INT64_REF, "int64ref")
+HANDLE_TF_REF_TYPE(StringRef, STRING_REF, "stringref")
+HANDLE_TF_REF_TYPE(BoolRef, BOOL_REF, "boolref")
+HANDLE_TF_REF_TYPE(Quint8Ref, QUINT8_REF, "quint8ref")
+HANDLE_TF_REF_TYPE(Qint8Ref, QINT8_REF, "qint8ref")
+HANDLE_TF_REF_TYPE(Quint16Ref, QUINT16_REF, "quint16ref")
+HANDLE_TF_REF_TYPE(Qint16Ref, QINT16_REF, "qint16ref")
+HANDLE_TF_REF_TYPE(Qint32Ref, QINT32_REF, "qint32ref")
+HANDLE_TF_REF_TYPE(Bfloat16Ref, BFLOAT16_REF, "bfloat16ref")
+HANDLE_TF_REF_TYPE(Complex64Ref, COMPLEX64_REF, "complex64ref")
+HANDLE_TF_REF_TYPE(Complex128Ref, COMPLEX128_REF, "complex128ref")
+HANDLE_TF_REF_TYPE(HalfRef, HALF_REF, "halfref")
+HANDLE_TF_REF_TYPE(ResourceRef, RESOURCE_REF, "resourceref")
+HANDLE_TF_REF_TYPE(Float8E4M3FNRef, FLOAT8_E4M3FN_REF, "float8e4m3fnref")
+HANDLE_TF_REF_TYPE(Float8E5M2Ref, FLOAT8_E5M2_REF, "float8e5m2ref")
+
+#ifndef HANDLE_LAST_TF_TYPE
+#define HANDLE_LAST_TF_TYPE(class, enumerant, name) \
+  HANDLE_TF_REF_TYPE(class, enumerant, name)
+#endif
+HANDLE_LAST_TF_TYPE(VariantRef, VARIANT_REF, "variantref")
+#undef HANDLE_LAST_TF_TYPE
+
+#undef HANDLE_TF_REF_TYPE
+#undef HANDLE_TF_TYPE
+#endif
+
+}  // end namespace TF
+}  // end namespace mlir
+
+#endif
 
 #endif  // TENSORFLOW_COMPILER_MLIR_TENSORFLOW_IR_TF_TYPES_H_

@@ -13,9 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "mlir/Support/TypeID.h"
+#include "mlir/IR/MLIRContext.h"  // TF:local_config_mlir
+
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_device.h"
 
-#include "mlir/IR/MLIRContext.h"  // TF:local_config_mlir
 
 namespace mlir {
 namespace tf_device {

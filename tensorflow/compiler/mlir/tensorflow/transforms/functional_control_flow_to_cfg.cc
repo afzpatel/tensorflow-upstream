@@ -16,7 +16,7 @@ limitations under the License.
 // This transformation pass transforms functional control flow operations in the
 // standard TensorFlow dialect to MLIR Control Flow Graph (CFG) form.
 
-#include "mlir/Dialect/StandardOps/Ops.h"  // TF:local_config_mlir
+//#include "mlir/Dialect/StandardOps/Ops.h"  // TF:local_config_mlir
 #include "mlir/IR/Builders.h"  // TF:local_config_mlir
 #include "mlir/IR/Operation.h"  // TF:local_config_mlir
 #include "mlir/IR/TypeUtilities.h"  // TF:local_config_mlir

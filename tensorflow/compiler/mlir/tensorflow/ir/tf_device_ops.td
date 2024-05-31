@@ -48,7 +48,7 @@ def TfDevice_Dialect : Dialect {
 //===----------------------------------------------------------------------===//
 
 // Base class for the operation in this dialect.
-class TfDevice_Op<string mnemonic, list<OpTrait> traits = []> :
+class TfDevice_Op<string mnemonic, list<Trait> traits = []> :
     Op<TfDevice_Dialect, mnemonic, traits> { }
 
 def TfDevice_LaunchOp : TfDevice_Op<"launch",
@@ -69,19 +69,19 @@ def TfDevice_LaunchOp : TfDevice_Op<"launch",
 
   let extraClassDeclaration = [{
     Block &GetBody() { return getOperation()->getRegion(0).front(); }
-    StringRef getDevice() { return device(); }
+    bool WrapsSingleOp();
   }];
 
   let builders = [
-    OpBuilder<[{Builder *builder, OperationState *result,
-                StringAttr device, ArrayRef<Type> result_types}],
-      [{
-        result->addAttribute("device", device);
-        result->addTypes(result_types);
-        result->addRegion();
-      }]
-    >
+    OpBuilder<(ins "StringAttr":$device, "TypeRange":$result_types),
+    [{
+      $_state.addAttribute("device", device);
+      $_state.addTypes(result_types);
+      $_state.addRegion();
+    }]>
   ];
+
+  let hasCanonicalizer = 1;
 }
 
 def TfDevice_ReturnOp : TfDevice_Op<"return",
@@ -95,14 +95,14 @@ def TfDevice_ReturnOp : TfDevice_Op<"return",
     Variadic<AnyType>:$results
   );
 
-  let builders = [OpBuilder<
-    "Builder *builder, OperationState *result",
+  let builders = [
+    OpBuilder<(ins),
     [{
-      build(builder, result, {});
+      build($_builder, $_state, {});
     }]>
    ];
 
-  let verifier = ?;
+  // let verifier = ?;
 }
 
 def TfDevice_LaunchFuncOp : TfDevice_Op<"launch_func", []> {
@@ -118,12 +118,6 @@ def TfDevice_LaunchFuncOp : TfDevice_Op<"launch_func", []> {
   let results = (outs
     Variadic<AnyType>:$results
   );
-
-  let extraClassDeclaration = [{
-    StringRef getFunc() { return func(); }
-    StringRef getDevice() { return device(); }
-    FunctionType getFuncType();
-  }];
 }
 
 #endif // TF_DEVICE_DIALECT

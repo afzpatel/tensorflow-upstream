@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "mlir/IR/Builders.h"  // TF:local_config_mlir
 #include "mlir/IR/Dialect.h"  // TF:local_config_mlir
+#include "mlir/Support/TypeID.h"
 
 namespace mlir {
 namespace tf_device {

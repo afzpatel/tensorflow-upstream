@@ -22,7 +22,7 @@ limitations under the License.
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/StandardOps/Ops.h"  // TF:local_config_mlir
+//#include "mlir/Dialect/StandardOps/Ops.h"  // TF:local_config_mlir
 #include "mlir/IR/Builders.h"  // TF:local_config_mlir
 #include "mlir/IR/Operation.h"  // TF:local_config_mlir
 #include "mlir/IR/Value.h"  // TF:local_config_mlir
@@ -120,7 +120,7 @@ void ControlToExecutorDialectConversion::runOnFunction() {
       // take as operands the results of the tf_executor.graph operation.
       SmallVector<Value *, 8> ret_vals;
       for (Value *operand : op.getOperands()) ret_vals.push_back(operand);
-      for (auto &graph_result : llvm::enumerate(graph_op.getResults()))
+      for (const auto &graph_result : llvm::enumerate(graph_op.getResults()))
         op.setOperand(graph_result.index(), graph_result.value());
       builder.create<tf_executor::FetchOp>(getFunction().getLoc(), ret_vals);
       continue;

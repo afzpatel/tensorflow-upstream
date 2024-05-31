@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "mlir/Dialect/Traits.h"  // TF:local_config_mlir
 #include "mlir/IR/Builders.h"  // TF:local_config_mlir
+#include "mlir/IR/BuiltinAttributeInterfaces.h"  // from @llvm-project
 
 namespace mlir {
 namespace TFL {
@@ -47,9 +48,9 @@ bool TFIntListIs1XY1(Operation *op, StringRef name, IntegerAttr *x,
   return true;
 }
 
-// Returns true if the attribute is an integer list of the form [1, X, Y, 1],
-bool TFIntListIs1XY1(const ArrayAttr &attr) {
-  const auto &elements = attr.getValue();
+// Returns true if the attribute is an integer list of the form [1, X, Y, 1].
+bool TFIntListIs1XY1(const Attribute attr) {
+  const auto &elements = attr.cast<ArrayAttr>().getValue();
   if (elements.size() != 4 ||
       std::any_of(elements.begin(), elements.end(),
                   [](Attribute e) { return !e.isa<IntegerAttr>(); }))
@@ -61,7 +62,7 @@ bool TFIntListIs1XY1(const ArrayAttr &attr) {
   return true;
 }
 
-bool IsBroadcastableElementsAttrs(mlir::Attribute a, mlir::Attribute b) {
+bool IsBroadcastableElementsAttrs(mlir::TypedAttr a, mlir::TypedAttr b) {
   // This would return false if we had unranked tensors (where they should
   // probably be considered as broadcastable), but given we are working with
   // attributes here that shouldn't be an issue,

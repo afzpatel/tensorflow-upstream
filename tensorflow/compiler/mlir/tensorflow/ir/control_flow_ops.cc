@@ -49,7 +49,7 @@ TFControlFlowDialect::TFControlFlowDialect(MLIRContext *context)
   // We allow unregistered TensorFlow operations in the control dialect.
   allowUnknownOperations();
 }
-
+/*
 // Parses a type registered to this dialect.
 Type TFControlFlowDialect::parseType(StringRef tyData, Location loc) const {
   if (tyData != "control")
@@ -62,6 +62,6 @@ void TFControlFlowDialect::printType(Type type, raw_ostream &os) const {
   assert(type.isa<TFControlType>());
   os << "control";
 }
-
+*/
 }  // namespace TFControlFlow
 }  // namespace mlir

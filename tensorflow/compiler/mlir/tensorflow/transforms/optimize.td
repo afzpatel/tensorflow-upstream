@@ -13,7 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 include "mlir/IR/OpBase.td"
-include "mlir/Dialect/StandardOps/Ops.td"
+include "mlir/IR/PatternBase.td"
+include "mlir/Dialect/Arith/IR/ArithOps.td"
 include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.td"
 
 def IsDataFormatNHWC : ConstantAttr<TF_ConvnetDataFormatAttr, "NHWC">;
@@ -26,17 +27,17 @@ def DefinedByConv2D : Constraint<CPred<"llvm::isa<mlir::TF::Conv2DOp>($0->getDef
 // If we see a Conv2D op followed by Mul, then multiply the filter
 // with the value in Mul.
 def FuseMulAndConv2D : Pat<(TF_MulOp (TF_Conv2DOp $input,
-                          (ConstantOp F32ElementsAttr:$filter),
+                          (Arith_ConstantOp F32ElementsAttr:$filter),
                           $strides,
                           $use_cudnn,
                           $padding, $explicit_padding,
                           IsDataFormatNHWC:$data_format,
                           $dilations),
-           (ConstantOp F32ElementsAttr:$value)),
+           (Arith_ConstantOp F32ElementsAttr:$value)),
 // TODO(karimnosseir): Add check for output is of rank 4.
           (TF_Conv2DOp $input,
-                       (TF_MulOp (ConstantOp $filter),
-                                 (ConstantOp $value)),
+                       (TF_MulOp (Arith_ConstantOp $filter),
+                                 (Arith_ConstantOp $value)),
                        $strides,
                        $use_cudnn,
                        $padding, $explicit_padding, $data_format,
@@ -54,11 +55,11 @@ def FuseMulAndConv2D : Pat<(TF_MulOp (TF_Conv2DOp $input,
 def PassthroughMulAndBiasAdd :
   Pat<(TF_MulOp
         (TF_BiasAddOp $input,
-          (ConstantOp F32ElementsAttr:$bias), IsDataFormatNHWC:$same_format),
-        (ConstantOp F32ElementsAttr:$value)),
+          (Arith_ConstantOp F32ElementsAttr:$bias), IsDataFormatNHWC:$same_format),
+        (Arith_ConstantOp F32ElementsAttr:$value)),
       (TF_BiasAddOp
-          (TF_MulOp $input, (ConstantOp $value)),
-          (TF_MulOp (ConstantOp $bias), (ConstantOp $value)),
+          (TF_MulOp $input, (Arith_ConstantOp $value)),
+          (TF_MulOp (Arith_ConstantOp $bias), (Arith_ConstantOp $value)),
           $same_format),
       [(DefinedByConv2D $input)]>;
 
@@ -73,9 +74,9 @@ def PassthroughMulAndBiasAdd :
 // This is to enable the FuseMulAndConv2D pattern.
 def PassthroughMulAndAddV2 :
   Pat<(TF_MulOp
-        (TF_AddV2Op $input, (ConstantOp F32ElementsAttr:$bias)),
-        (ConstantOp F32ElementsAttr:$value)),
+        (TF_AddV2Op $input, (Arith_ConstantOp F32ElementsAttr:$bias)),
+        (Arith_ConstantOp F32ElementsAttr:$value)),
       (TF_AddV2Op
-          (TF_MulOp $input, (ConstantOp $value)),
-          (TF_MulOp (ConstantOp $bias), (ConstantOp $value))),
+          (TF_MulOp $input, (Arith_ConstantOp $value)),
+          (TF_MulOp (Arith_ConstantOp $bias), (Arith_ConstantOp $value))),
       [(DefinedByConv2D $input)]>;

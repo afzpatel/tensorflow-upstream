@@ -259,11 +259,6 @@ cuda_py_test(
         "//tensorflow/python:training",
     ],
     tags = [
-<<<<<<< HEAD
-=======
-        "no_mac",  # fails on this branch
-        "no_rocm",
->>>>>>> upstream/r1.15
         "no_windows",  #TODO(b/139745667)
     ],
     xla_enable_strict_auto_jit = True,

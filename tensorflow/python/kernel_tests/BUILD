@@ -794,6 +794,7 @@ tf_py_test(
         "//tensorflow/python:parsing_ops",
         "//tensorflow/python:platform",
     ],
+    tags = ["no_mac"],
 )
 
 tf_py_test(
@@ -3288,6 +3289,7 @@ cuda_py_test(
         "//tensorflow/python:framework_for_generated_wrappers",
     ],
     tags = [
+        "no_mac",  # timeouts on GPU
         "no_pip",
         "notap",  # http://b/31080670
     ],

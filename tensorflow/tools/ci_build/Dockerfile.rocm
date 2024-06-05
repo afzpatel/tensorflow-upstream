@@ -98,7 +98,7 @@ RUN touch ${ROCM_PATH}/.info/version
 RUN bash -c 'ln -s ${ROCM_PATH} /opt/rocm'
 
 # Add target file to help determine which device(s) to build for
-RUN bash -c 'echo -e "gfx906\ngfx908\ngfx90a\ngfx940\ngfx94\ngfx942\ngfx1030\ngfx1100" >> ${ROCM_PATH}/bin/target.lst'
+RUN bash -c 'echo -e "gfx906\ngfx908\ngfx90a\ngfx940\ngfx941\ngfx942\ngfx1030\ngfx1100" >> ${ROCM_PATH}/bin/target.lst'
 
 # Upgrade pip.
 RUN pip3 install --upgrade pip

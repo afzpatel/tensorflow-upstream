@@ -46,10 +46,10 @@ limitations under the License.
 namespace stream_executor {
 namespace interpreter {
 
-class XlaInterpreterExecutor : public StreamExecutorInterface {
+class XlaInterpreterExecutor : public StreamExecutor {
  public:
-  explicit XlaInterpreterExecutor(int device_ordinal)
-      : device_ordinal_(device_ordinal) {}
+  XlaInterpreterExecutor(int device_ordinal, Platform *platform)
+      : StreamExecutor(platform), device_ordinal_(device_ordinal) {}
 
   absl::Status Init() override { return absl::OkStatus(); }
 
@@ -114,8 +114,6 @@ class XlaInterpreterExecutor : public StreamExecutorInterface {
   bool HostCallback(Stream *stream,
                     absl::AnyInvocable<absl::Status() &&> callback) override;
 
-  absl::Status AllocateEvent(Event *event) override { return absl::OkStatus(); }
-
   absl::Status DeallocateEvent(Event *event) override {
     return absl::OkStatus();
   }
@@ -132,7 +130,6 @@ class XlaInterpreterExecutor : public StreamExecutorInterface {
     return Event::Status::kError;
   }
 
-  bool AllocateStream(Stream *stream) override { return true; }
   void DeallocateStream(Stream *stream) override {}
   bool CreateStreamDependency(Stream *dependent, Stream *other) override;
 
@@ -157,24 +154,22 @@ class XlaInterpreterExecutor : public StreamExecutorInterface {
   bool CanEnablePeerAccessTo(StreamExecutorInterface *other) override {
     return true;
   }
-
-  std::unique_ptr<EventInterface> CreateEventImplementation() override {
-    return nullptr;
+  absl::StatusOr<std::unique_ptr<Event>> CreateEvent() override {
+    return std::make_unique<Event>(this, nullptr);
   }
 
-  std::unique_ptr<StreamInterface> GetStreamImplementation() override {
-    return std::make_unique<host::HostStream>();
+  absl::StatusOr<std::unique_ptr<Stream>> CreateStream(
+      std::optional<std::variant<StreamPriority, int>> priority =
+          std::nullopt) override {
+    auto stream =
+        std::make_unique<Stream>(this, std::make_unique<host::HostStream>());
+    return std::move(stream);
   }
 
  private:
   // The device ordinal value that this executor was initialized with; recorded
   // for use in getting device metadata. Immutable post-initialization.
   int device_ordinal_;
-
-  DeviceMemoryBase AllocateSingleOutput(const xla::Shape &shape);
-
-  absl::StatusOr<DeviceMemoryBase> AllocateOutputBuffer(
-      const xla::Shape &shape);
 };
 
 }  // namespace interpreter

@@ -102,29 +102,6 @@ void RemoveUnusedAndUninitializedGlobals(
 
 }  // namespace
 
-void ForAllThunks(const std::function<void(Thunk*)>& fn,
-                  ThunkSequence* thunk_sequence) {
-  for (std::unique_ptr<Thunk>& thunk : *thunk_sequence) {
-    if (thunk->kind() == Thunk::kConditional) {
-      auto* cond_thunk = tensorflow::down_cast<ConditionalThunk*>(thunk.get());
-      for (const std::unique_ptr<SequentialThunk>& branch_thunks :
-           cond_thunk->branch_thunks()) {
-        ForAllThunks(fn, &branch_thunks->thunks());
-      }
-    } else if (thunk->kind() == Thunk::kSequential) {
-      auto* sequential_thunk =
-          tensorflow::down_cast<SequentialThunk*>(thunk.get());
-      ForAllThunks(fn, &sequential_thunk->thunks());
-    } else if (thunk->kind() == Thunk::kWhile) {
-      auto* while_thunk = tensorflow::down_cast<WhileThunk*>(thunk.get());
-      ForAllThunks(fn, &while_thunk->condition_thunk_sequence()->thunks());
-      ForAllThunks(fn, &while_thunk->body_thunk_sequence()->thunks());
-    } else {
-      fn(thunk.get());
-    }
-  }
-}
-
 absl::StatusOr<CompileModuleResults> CompileModuleToLlvmIr(
     HloModule* hlo_module, llvm::LLVMContext* llvm_context,
     const std::string& target_triple, const std::string& data_layout,
@@ -133,26 +110,33 @@ absl::StatusOr<CompileModuleResults> CompileModuleToLlvmIr(
     const HloDataflowAnalysis::CanShareBuffer& can_share_buffer_function,
     const BufferValue::SizeFunction& buffer_size_bytes_function) {
   CompileModuleResults results;
-  results.llvm_module = std::make_unique<llvm::Module>("", *llvm_context);
+  results.llvm_module =
+      std::make_unique<llvm::Module>(hlo_module->name(), *llvm_context);
   results.llvm_module->setTargetTriple(target_triple);
   results.llvm_module->setDataLayout(data_layout);
 
-  TF_ASSIGN_OR_RETURN(
-      results.buffer_assignment,
-      BufferAssigner::Run(
-          hlo_module,
-          std::make_unique<SequentialHloOrdering>(hlo_module->schedule()),
-          buffer_size_bytes_function,
-          /*color_alignment=*/
-          [](LogicalBuffer::Color) { return kXlaAllocatedBufferAlignBytes; },
-          /*allocate_buffers_for_constants=*/true,
-          /*colorer=*/
-          hlo_module->config()
-                  .debug_options()
-                  .xla_gpu_enable_nccl_user_buffers()
-              ? CollectiveColorer()
-              : BufferAssigner::DefaultColorer(),
-          /*must_not_live_out=*/{}, can_share_buffer_function));
+  {
+    tsl::profiler::ScopedAnnotation annotation([&] {
+      return absl::StrFormat("XlaBufferAssignment:#module=%s,program_id=%d#",
+                             hlo_module->name(), hlo_module->unique_id());
+    });
+    TF_ASSIGN_OR_RETURN(
+        results.buffer_assignment,
+        BufferAssigner::Run(
+            hlo_module,
+            std::make_unique<SequentialHloOrdering>(hlo_module->schedule()),
+            buffer_size_bytes_function,
+            /*color_alignment=*/
+            [](LogicalBuffer::Color) { return kXlaAllocatedBufferAlignBytes; },
+            /*allocate_buffers_for_constants=*/true,
+            /*colorer=*/
+            hlo_module->config()
+                    .debug_options()
+                    .xla_gpu_enable_nccl_user_buffers()
+                ? CollectiveColorer()
+                : BufferAssigner::DefaultColorer(),
+            /*must_not_live_out=*/{}, can_share_buffer_function));
+  }
 
   VLOG(1) << "Buffer Assignment Stats for " << hlo_module->name() << "\n"
           << results.buffer_assignment->GetStats().ToString();
@@ -184,6 +168,10 @@ absl::StatusOr<CompileModuleResults> CompileModuleToLlvmIr(
 
   results.module_name = hlo_module->name();
 
+  tsl::profiler::ScopedAnnotation annotation([&] {
+    return absl::StrFormat("XlaEmitLlvmIr:#module=%s,program_id=%d#",
+                           hlo_module->name(), hlo_module->unique_id());
+  });
   IrEmitterContext ir_emitter_context(
       hlo_module, results.buffer_assignment.get(), platform_name,
       gpu_device_info, mlir_context.get(), results.llvm_module.get(),
@@ -223,10 +211,7 @@ absl::StatusOr<CompileModuleResults> CompileModuleToLlvmIr(
     RecordHloToLlvmDuration(end_usecs - start_usecs);
   }
 
-  auto thunk_sequence = ir_emitter->ConsumeThunkSequence();
-  ForAllThunks([](Thunk* thunk) { thunk->ClearCompileTimeInfo(); },
-               thunk_sequence.get());
-  results.executable = std::move(thunk_sequence);
+  results.executable = ir_emitter->ConsumeThunkSequence();
 
   return results;
 }

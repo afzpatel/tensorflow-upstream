@@ -29,7 +29,7 @@ limitations under the License.
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/client.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
-#include "tsl/concurrency/ref_count.h"
+#include "xla/tsl/concurrency/ref_count.h"
 
 namespace xla {
 namespace ifrt {
@@ -56,7 +56,7 @@ class PjRtTuple final : public llvm::RTTIExtends<PjRtTuple, Tuple> {
 
   int Arity() override;
 
-  Status Unpack(absl::Span<tsl::RCReference<Value>> values) override;
+  absl::Status Unpack(absl::Span<tsl::RCReference<Value>> values) override;
 
   static char ID;  // NOLINT
 

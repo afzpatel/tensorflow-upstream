@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef XLA_TSL_DISTRIBUTED_RUNTIME_COORDINATION_COORDINATION_SERVICE_H_
 #define XLA_TSL_DISTRIBUTED_RUNTIME_COORDINATION_COORDINATION_SERVICE_H_
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -23,11 +24,14 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "xla/tsl/distributed_runtime/coordination/coordination_client.h"
+#include "tsl/platform/macros.h"
 #include "tsl/platform/status.h"
-#include "tsl/platform/statusor.h"
 #include "tsl/protobuf/coordination_config.pb.h"
 
 namespace tsl {
@@ -50,7 +54,7 @@ class Env;
 // execution in a cluster of multiple tasks.
 //
 // When enabled, the service keeps track of cluster configurations and the state
-// of cluster members. TF runtime and libraries can use it to orchastrate
+// of cluster members. TF runtime and libraries can use it to orchestrate
 // cluster initialization, check the healthiness of tasks, and propagate error
 // messages to the cluster.
 //
@@ -113,6 +117,7 @@ class CoordinationServiceInterface {
 
   // Register a task to the service.
   // Possible service errors:
+  //   - Internal: Service has shut down.
   //   - InvalidArgument: Unexpected task request.
   //   - Aborted: (1) task is in error state, or (2) task is in connected state
   //       with a different incarnation, indicating that it restarted.
@@ -132,6 +137,7 @@ class CoordinationServiceInterface {
   // specified in the config, blocks until all tasks reach the barrier before
   // disconnecting together.
   // Possible service errors:
+  //   - Internal: Service has shut down.
   //   - InvalidArgument: Unexpected task request.
   //   - FailedPrecondition: task has already disconnected.
   virtual void ShutdownTaskAsync(const tensorflow::CoordinatedTask& task,
@@ -139,12 +145,14 @@ class CoordinationServiceInterface {
 
   // Disconnects task from the service and cleans up its internal error state.
   // Possible service errors:
+  //   - Internal: Service has shut down.
   //   - InvalidArgument: Unexpected task request.
   //   - FailedPrecondition: task has already disconnected.
   virtual absl::Status ResetTask(const tensorflow::CoordinatedTask& task) = 0;
 
   // Update the heartbeat timestamp of a task. This should only be invoked on
   // the leader of the cluster.
+  //   - Internal: Service has shut down.
   virtual absl::Status RecordHeartbeat(const tensorflow::CoordinatedTask& task,
                                        uint64_t incarnation) = 0;
 
@@ -202,11 +210,12 @@ class CoordinationServiceInterface {
   //
   // Possible service errors:
   //   - DeadlineExceeded: Timed out waiting for specified tasks at the barrier.
-  //      Deadline is determined by the server timestamp when it receives the
-  //      first WaitAtBarrier() + timeout duration.
+  //       Deadline is determined by the server timestamp when it receives the
+  //       first WaitAtBarrier() + timeout duration.
   //   - Cancelled: One of the tasks called CancelBarrier().
   //   - Aborted: Service is shutting down.
-  //   - Internal: Any participating task is in ERROR state.
+  //   - Internal: Any participating task is in ERROR state, or coordination
+  //   -   service has shut down.
   //   - InvalidArgument: (1) Conflicting tasks specified by different agents
   //       for the same barrier, (2) one of the participating tasks is not in
   //       the cluster, or (3) task making the request is not included in the

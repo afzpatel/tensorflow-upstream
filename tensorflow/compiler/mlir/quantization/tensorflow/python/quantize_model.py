@@ -607,8 +607,8 @@ def _populate_calibration_options(
       calib_opts.calibration_method
       == _CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_PERCENTILE
   ):
-    if not calib_opts.calibration_parameters.initial_num_bins:
-      calib_opts.calibration_parameters.initial_num_bins = 256
+    if not calib_opts.calibration_parameters.num_bins:
+      calib_opts.calibration_parameters.num_bins = 512
     if not calib_opts.calibration_parameters.min_percentile:
       calib_opts.calibration_parameters.min_percentile = 0.001
     if not calib_opts.calibration_parameters.max_percentile:
@@ -632,8 +632,14 @@ def _populate_calibration_options(
           f' methods. calibration_method={calib_opts.calibration_method}'
       )
 
-    if not calib_opts.calibration_parameters.initial_num_bins:
-      calib_opts.calibration_parameters.initial_num_bins = 256
+    if not calib_opts.calibration_parameters.num_bins:
+      calib_opts.calibration_parameters.num_bins = 512
+
+  if calib_opts.calibration_data_dir:
+    save_model.create_empty_output_dir(
+        calib_opts.calibration_data_dir,
+        overwrite=calib_opts.force_regenerate_calibration_data,
+    )
 
 
 def _populate_quantization_options_default_values(
@@ -735,24 +741,24 @@ def _populate_quantization_options_default_values(
   if (quantization_options.op_set == quant_opts_pb2.OpSet.STABLEHLO) and (
       quantization_options.quantization_method.preset_method
       != _PresetMethod.METHOD_STATIC_RANGE_INT8
+      and quantization_options.quantization_method.preset_method
+      != _PresetMethod.METHOD_STATIC_RANGE_WEIGHT_ONLY_INT8
   ):
     raise ValueError(
         'StableHLO quantized opset currently only supports static range'
-        ' quantization via TF Quantizer.'
+        ' quantization and weight-only quantizationvia TF Quantizer.'
     )
+
+  # Set `force_graph_mode_calibration` to True to avoid skipping op execution,
+  # which are not connected to return ops, during calibration execution.
+  # TODO: b/335031954 - Bring back support to run calibration in Eager mode.
+  logging.debug(
+      'Setting `force_graph_mode_calibration = True` to ensure the calibration'
+      ' mode is executed properly.'
+  )
+  quantization_options.force_graph_mode_calibration = True
 
   if quantization_options.HasField('debugger_config'):
-    # Set `force_graph_mode_calibration` to True to avoid skipping op execution,
-    # which are not connected to return ops, during calibration execution.
-    # Setting `force_graph_mode_calibration` to True enables execution of the
-    # model in graph mode (not eager mode).
-    logging.debug(
-        'Setting `force_graph_mode_calibration = True` to ensure the debugging '
-        'model is executed in graph mode during calibration, rather than eager '
-        'mode.'
-    )
-    quantization_options.force_graph_mode_calibration = True
-
     if not quantization_options.debugger_config.log_dir_path:
       quantization_options.debugger_config.log_dir_path = '/tmp/dumps'
 

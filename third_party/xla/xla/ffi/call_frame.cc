@@ -26,6 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/base/dynamic_annotations.h"
 #include "absl/log/check.h"
 #include "absl/types/span.h"
 #include "xla/ffi/api/c_api.h"
@@ -83,12 +84,16 @@ void CallFrameBuilder::AddBufferArg(se::DeviceMemoryBase memory,
                                     PrimitiveType type,
                                     absl::Span<const int64_t> dims) {
   args_.push_back(Buffer{memory, type, {dims.begin(), dims.end()}});
+  ABSL_ANNOTATE_MEMORY_IS_INITIALIZED(
+      args_.back().dims.data(), sizeof(int64_t) * args_.back().dims.size());
 }
 
 void CallFrameBuilder::AddBufferRet(se::DeviceMemoryBase memory,
                                     PrimitiveType type,
                                     absl::Span<const int64_t> dims) {
   rets_.push_back(Buffer{memory, type, {dims.begin(), dims.end()}});
+  ABSL_ANNOTATE_MEMORY_IS_INITIALIZED(
+      rets_.back().dims.data(), sizeof(int64_t) * rets_.back().dims.size());
 }
 
 void CallFrameBuilder::AddAttributes(AttributesMap attrs) {
@@ -133,22 +138,21 @@ struct CallFrame::Dictionary {
 };
 
 struct CallFrame::Array {
-  std::variant<std::vector<int32_t>, std::vector<int64_t>, std::vector<float>>
-      value;  // XLA_FFI_Array::data
+  CallFrameBuilder::Array value;  // XLA_FFI_Array::data
 
-  XLA_FFI_Array array = {XLA_FFI_Array_STRUCT_SIZE, nullptr};
+  XLA_FFI_Array array = {};
 };
 
 struct CallFrame::Scalar {
-  std::variant<int32_t, int64_t, float> value;  // XLA_FFI_Scalar::value
+  CallFrameBuilder::Scalar value;  // XLA_FFI_Scalar::value
 
-  XLA_FFI_Scalar scalar = {XLA_FFI_Scalar_STRUCT_SIZE, nullptr};
+  XLA_FFI_Scalar scalar = {};
 };
 
 struct CallFrame::String {
   std::string value;  // XLA_FFI_ByteSpan::ptr
 
-  XLA_FFI_ByteSpan span = {XLA_FFI_ByteSpan_STRUCT_SIZE, nullptr};
+  XLA_FFI_ByteSpan span = {};
 };
 
 struct CallFrame::NamedAttribute {
@@ -246,9 +250,13 @@ static XLA_FFI_DataType ToDataType(PrimitiveType primitive_type) {
     case PrimitiveType::F32:
     case PrimitiveType::F64:
     case PrimitiveType::BF16:
+    case PrimitiveType::C64:
+    case PrimitiveType::C128:
+    case PrimitiveType::TOKEN:
       return static_cast<XLA_FFI_DataType>(primitive_type);
     default:
-      DCHECK(false) << "Unsupported primitive type" << primitive_type;
+      DCHECK(false) << "Unsupported primitive type "
+                    << PrimitiveType_Name(primitive_type);
       return XLA_FFI_DataType_INVALID;
   }
 }
@@ -355,12 +363,28 @@ struct CallFrame::ConvertAttribute {
 
 template <typename T>
 static XLA_FFI_DataType GetDataType() {
-  if constexpr (std::is_same_v<int32_t, T>) {
+  if constexpr (std::is_same_v<bool, T>) {
+    return XLA_FFI_DataType_PRED;
+  } else if constexpr (std::is_same_v<int8_t, T>) {
+    return XLA_FFI_DataType_S8;
+  } else if constexpr (std::is_same_v<int16_t, T>) {
+    return XLA_FFI_DataType_S16;
+  } else if constexpr (std::is_same_v<int32_t, T>) {
     return XLA_FFI_DataType_S32;
   } else if constexpr (std::is_same_v<int64_t, T>) {
     return XLA_FFI_DataType_S64;
+  } else if constexpr (std::is_same_v<uint8_t, T>) {
+    return XLA_FFI_DataType_U8;
+  } else if constexpr (std::is_same_v<uint16_t, T>) {
+    return XLA_FFI_DataType_U16;
+  } else if constexpr (std::is_same_v<uint32_t, T>) {
+    return XLA_FFI_DataType_U32;
+  } else if constexpr (std::is_same_v<uint64_t, T>) {
+    return XLA_FFI_DataType_U64;
   } else if constexpr (std::is_same_v<float, T>) {
     return XLA_FFI_DataType_F32;
+  } else if constexpr (std::is_same_v<double, T>) {
+    return XLA_FFI_DataType_F64;
   } else {
     static_assert(sizeof(T) == 0, "unsupported FFI data type");
   }

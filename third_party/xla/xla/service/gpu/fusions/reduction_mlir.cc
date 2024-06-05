@@ -15,21 +15,21 @@ limitations under the License.
 #include "xla/service/gpu/fusions/reduction_mlir.h"
 
 #include <cstdint>
-#include <iterator>
+#include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
-#include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"  // from @llvm-project
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"  // from @llvm-project
 #include "mlir/Dialect/SCF/IR/SCF.h"  // from @llvm-project
+#include "mlir/Dialect/Tensor/IR/Tensor.h"  // from @llvm-project
 #include "mlir/IR/AffineExpr.h"  // from @llvm-project
 #include "mlir/IR/AffineMap.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
@@ -40,34 +40,59 @@ limitations under the License.
 #include "mlir/IR/ValueRange.h"  // from @llvm-project
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/service/gpu/fusions/fusion_emitter.h"
 #include "xla/service/gpu/fusions/mlir/computation_partitioner.h"
 #include "xla/service/gpu/fusions/mlir/elemental_hlo_to_mlir.h"
 #include "xla/service/gpu/fusions/mlir/ir/xla_gpu_ops.h"
 #include "xla/service/gpu/fusions/mlir/type_util.h"
 #include "xla/service/gpu/fusions/reduction_base.h"
 #include "xla/service/gpu/hlo_fusion_analysis.h"
+#include "xla/service/gpu/hlo_traversal.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/model/indexing_analysis.h"
 #include "xla/service/gpu/model/indexing_map.h"
 #include "xla/service/gpu/reduction_utils.h"
+#include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status_macros.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace gpu {
 
+namespace ma = mlir::arith;
 using llvm::SmallVector;
 using mlir::Value;
 using mlir::ValueRange;
 using mlir_converter::PartitionedComputations;
 
+using HloValueMap =
+    absl::flat_hash_map<const HloInstruction*, llvm::SmallVector<Value>>;
+
 struct MlirReductionFusion::EmitterState {
-  // Uses the given indexing map to reduce a subset of the inputs in a single
-  // thread. The subset may be a single element.
-  absl::StatusOr<SmallVector<Value>> EmitPerThreadReducedElements(
-      const IndexingMap& input_indexing, const HloInstruction* hero,
-      ValueRange inits);
+  EmitterState(const MlirReductionFusion& owner,
+               mlir::func::FuncOp entry_function,
+               const HloFusionInstruction& fusion,
+               const PartitionedComputations& computations,
+               const mlir_converter::CallTargetProvider& call_target)
+      : owner(owner),
+        entry_function(entry_function),
+        fusion(fusion),
+        computations(computations),
+        call_target(call_target),
+        builder(entry_function.getLoc(), entry_function),
+        computation(computations.FindPartitionedComputation(
+            fusion.fused_instructions_computation())) {
+    int index = 0;
+    for (const auto& root : owner.analysis().fusion_roots()) {
+      fusion_result_index_starts[&root.instruction()] = index;
+      index += root.shape().IsTuple() ? root.shape().tuple_shapes_size() : 1;
+    }
+  }
+
+  // Reduces a subset of the inputs in a single thread. Also writes side outputs
+  // to the output tensors. The map contains the reduced values for reductions
+  // and the written tensors for side outputs.
+  HloValueMap EmitPerThreadReducedElements(int group_id,
+                                           const HloValueMap& inits);
 
   mlir::func::FuncOp GetReducer(const HloInstruction* hero) const {
     return call_target(hero->called_computations()[0]->root_instruction());
@@ -81,103 +106,126 @@ struct MlirReductionFusion::EmitterState {
         fusion.fused_parameters().size()));
   }
 
+  int OutputIndex(const HloInstruction* root, int result_index) {
+    return fusion_result_index_starts[root] + result_index;
+  }
+
   const MlirReductionFusion& owner;
   mlir::func::FuncOp entry_function;
   const HloFusionInstruction& fusion;
   const PartitionedComputations& computations;
   const mlir_converter::CallTargetProvider& call_target;
   mlir::ImplicitLocOpBuilder builder;
+  const mlir_converter::PartitionedComputation& computation;
+  absl::flat_hash_map<const HloInstruction*, int> fusion_result_index_starts;
+  SmallVector<Value> thread_and_block_ids;
 };
 
 MlirReductionFusion::MlirReductionFusion(const HloFusionAnalysis& analysis)
     : ReductionFusionBase(analysis) {
-  for (auto [index, hero] : llvm::enumerate(analysis.fusion_heroes())) {
-    if (reduction_info().GetGroups().is_reduction_root[index]) {
-      reduction_roots_[hero].push_back(index);
+  CHECK(reduction_info().IsRaceFree())
+      << "Non-race-free reductions should have been decomposed. Did "
+         "tree_reduction_rewriter run?";
+
+  const auto& groups = reduction_info().GetGroups();
+  int num_groups = groups.grouped_roots.size();
+  side_output_roots_.resize(num_groups);
+  reduction_heroes_.resize(num_groups);
+  reduction_roots_.resize(num_groups);
+
+  absl::flat_hash_set<const HloInstruction*> seen_heroes;
+  for (auto [root_adaptor, hero_adaptor, is_reduction, group_id] :
+       llvm::zip(analysis.fusion_roots(), analysis.fusion_heroes(),
+                 groups.is_reduction_root, groups.group_id_per_root)) {
+    const HloInstruction* root = &root_adaptor.instruction();
+    const HloInstruction* hero = &hero_adaptor.instruction();
+    if (is_reduction) {
+      if (seen_heroes.insert(hero).second) {
+        reduction_heroes_[group_id].push_back(hero);
+      }
+      reduction_roots_[group_id].push_back(root);
+    } else {
+      side_output_roots_[group_id].push_back(root);
     }
   }
+}
 
-  for (const auto& [hero, _] : reduction_roots_) {
-    reduction_heroes_.push_back(hero);
+std::vector<mlir_converter::EpilogueSpecification>
+MlirReductionFusion::GetEpilogues(const HloFusionInstruction& fusion,
+                                  mlir::MLIRContext* mlir_context) const {
+  std::vector<mlir_converter::EpilogueSpecification> epilogues;
+  epilogues.reserve(reduction_heroes_.size());
+  for (const auto& [heroes, roots] :
+       llvm::zip(reduction_heroes_, reduction_roots_)) {
+    epilogues.push_back(
+        mlir_converter::EpilogueSpecification::FromOutputIndexing(
+            analysis(), heroes, roots, *this, mlir_context));
   }
-}
-
-bool MlirReductionFusion::IsSupported(const HloFusionAnalysis& analysis) {
-  auto info = ReductionInfo::Create(analysis);
-  return info.GetGroups().grouped_roots.size() == 1 &&
-         !absl::c_linear_search(info.GetGroups().is_reduction_root, false) &&
-         info.IsRaceFree();
-}
-
-std::optional<mlir_converter::EpilogueSpecification>
-MlirReductionFusion::GetEpilogue(const HloFusionInstruction& fusion,
-                                 mlir::MLIRContext* mlir_context) const {
-  return mlir_converter::EpilogueSpecification::FromOutputIndexing(
-      analysis(), reduction_heroes_, *this, mlir_context);
+  return epilogues;
 }
 
 absl::Status MlirReductionFusion::EmitEntryFunction(
-    const mlir_converter::PartitionedComputations& computations,
+    const PartitionedComputations& computations,
     const mlir_converter::CallTargetProvider& call_targets,
     mlir::func::FuncOp entry_function,
     const HloFusionInstruction& fusion) const {
-  // Reduction groups will probably be implemented in a separate pass, since
-  // they share nothing by definition.
-  TF_RET_CHECK(reduction_info().GetGroups().grouped_roots.size() == 1)
-      << "Only one reduction group is supported.";
-  EmitterState state{*this,        entry_function,
-                     fusion,       computations,
-                     call_targets, {entry_function.getLoc(), entry_function}};
-  state.builder.setInsertionPointToStart(entry_function.addEntryBlock());
-  return EmitReduction(state);
+  EmitterState state{*this, entry_function, fusion, computations, call_targets};
+  auto& b = state.builder;
+  b.setInsertionPointToStart(entry_function.addEntryBlock());
+  state.thread_and_block_ids = EmitThreadAndBlockIds(b);
+  if (reduction_heroes_.size() == 1) {
+    b.create<mlir::func::ReturnOp>(EmitReduction(0, state));
+    return absl::OkStatus();
+  }
+  SmallVector<int64_t> cases(reduction_heroes_.size() - 1);
+  absl::c_iota(cases, 1);  // `default` is region 0.
+  auto switch_op = b.create<mlir::scf::IndexSwitchOp>(
+      entry_function.getResultTypes(), EmitBlockId(b, 1), cases, cases.size());
+  b.create<mlir::func::ReturnOp>(switch_op.getResults());
+  for (auto [id, region] : llvm::enumerate(switch_op->getRegions())) {
+    b.setInsertionPointToStart(&region.emplaceBlock());
+    b.create<mlir::scf::YieldOp>(EmitReduction(id, state));
+  }
+  return absl::OkStatus();
 }
 
-absl::Status MlirReductionFusion::EmitReduction(EmitterState& state) const {
-  CHECK(IsSupported(analysis()))
-      << "Attempting to output code for an unsupported reduction";
-  auto& builder = state.builder;
+llvm::SmallVector<Value> MlirReductionFusion::EmitReduction(
+    int group_id, EmitterState& state) const {
+  auto& b = state.builder;
   const auto& tiling = reduction_info().GetTiling();
+  const auto& threads_per_block = tiling.GetThreadsPerBlock();
+  auto* ctx = state.entry_function.getContext();
 
   // The number of warps working on one element in a row reduction.
-  int num_warps_row = tiling.GetThreadsPerBlock()
-                          [ReductionDimensions::kRowMinorReducedDimension] /
-                      WarpSize();
-  auto ctx = state.entry_function.getContext();
+  int num_warps_row =
+      threads_per_block[ReductionDimensions::kRowMinorReducedDimension] /
+      WarpSize();
 
-  auto zero = builder.create<mlir::arith::ConstantIndexOp>(0);
-  auto lane_id = builder.create<mlir::gpu::LaneIdOp>();
-  auto is_first_lane = builder.create<mlir::arith::CmpIOp>(
-      mlir::arith::CmpIPredicate::eq, lane_id, zero);
-  auto thread_id = EmitThreadId(builder, 0);
-  auto block_id = EmitBlockId(builder, 0);
-  Value cstTrue = builder.create<mlir::arith::ConstantOp>(
-      builder.getIntegerAttr(builder.getI1Type(), 1));
+  auto zero = b.create<ma::ConstantIndexOp>(0);
+  auto lane_id = b.create<mlir::gpu::LaneIdOp>();
+  auto is_first_lane =
+      b.create<ma::CmpIOp>(ma::CmpIPredicate::eq, lane_id, zero);
+  auto thread_id = state.thread_and_block_ids[0];
+  Value cst_true = b.create<ma::ConstantOp>(b.getOneAttr(b.getI1Type()));
 
-  auto thread_ids = mlir_converter::ApplyAffineMap(
-      mlir::AffineMap::get(
-          /*dimCount=*/1, /*symbolCount=*/0,
-          DelinearizeInBoundsIndex(mlir::getAffineDimExpr(0, ctx),
-                                   tiling.GetThreadsPerBlock(),
-                                   tiling.GetThreadStrides()),
-          ctx),
-      {thread_id}, {}, builder);
-  SmallVector<Value> thread_and_block_indices{thread_id, zero, zero,
-                                              block_id,  zero, zero};
+  auto thread_indexing = GetBitcastMap(
+      ShapeUtil::MakeShapeWithDescendingLayout(
+          U8, {tiling.GetNumThreadsPerBlock()}),
+      ShapeUtil::MakeShapeWithDescendingLayout(U8, threads_per_block), ctx);
+  auto thread_ids =
+      mlir_converter::ApplyIndexing(thread_indexing, {thread_id}, {}, b);
 
-  auto warp_id = builder.create<mlir::arith::DivUIOp>(
+  auto warp_id = b.create<ma::DivUIOp>(
       reduction_info().IsRowReduction()
           ? thread_ids[ReductionDimensions::kRowMinorReducedDimension]
           : thread_id,
-      builder.create<mlir::arith::ConstantIndexOp>(WarpSize()));
-
-  auto output_args = state.entry_function.getArguments().drop_front(
-      state.fusion.fused_parameters().size());
+      b.create<ma::ConstantIndexOp>(WarpSize()));
 
   std::vector<int64_t> shared_tile_size;
   SmallVector<Value> shared_write_indices;
   SmallVector<Value> shared_read_indices;
-  Value shared_write_condition = cstTrue;
-  Value shared_read_condition = cstTrue;
+  Value shared_write_condition = cst_true;
+  Value shared_read_condition = cst_true;
   if (!reduction_info().IsRowReduction()) {
     shared_tile_size = {WarpSize(), WarpSize() + 1};
     shared_write_indices = {lane_id, warp_id};
@@ -186,195 +234,201 @@ absl::Status MlirReductionFusion::EmitReduction(EmitterState& state) const {
     auto kKept = ReductionDimensions::kRowKeptDimension;
     shared_tile_size = {tiling.GetThreadsPerBlock()[kKept], num_warps_row};
     shared_write_condition = is_first_lane;
-    shared_read_condition = builder.create<mlir::arith::CmpIOp>(
-        mlir::arith::CmpIPredicate::ult,
+    shared_read_condition = b.create<ma::CmpIOp>(
+        ma::CmpIPredicate::ult,
         thread_ids[ReductionDimensions::kRowMinorReducedDimension],
-        builder.create<mlir::arith::ConstantIndexOp>(num_warps_row));
+        b.create<ma::ConstantIndexOp>(num_warps_row));
     shared_write_indices = {thread_ids[kKept], warp_id};
     shared_read_indices = {thread_ids[kKept], lane_id};
   }
-  bool use_shared = !shared_tile_size.empty();
 
-  llvm::SmallVector<llvm::SmallVector<mlir::Value>> root_output_indices;
-  root_output_indices.resize(analysis().fusion_roots().size());
-  for (const auto& [hero, root_ids] : reduction_roots_) {
-    auto hero_indices = mlir_converter::ApplyAffineMap(
-        ComputeThreadIdToOutputIndexing(root_ids.front(), ctx)->GetAffineMap(),
-        thread_and_block_indices, {}, builder);
-    auto root_indices = mlir_converter::ApplyAffineMap(
-        ComputeEpilogueInputToOutputIndexing(hero, ctx).GetAffineMap(),
-        hero_indices, {}, builder);
-    for (auto root_id : root_ids) {
-      root_output_indices[root_id] = root_indices;
-    }
-  }
+  auto evaluate_epilogue = [&](const HloValueMap& results,
+                               llvm::SmallVector<Value> outputs) {
+    const auto& epilogue = state.computations.epilogues()[group_id];
+    if (epilogue.roots.empty()) return outputs;
 
-  if (analysis().fusion_roots().size() == 1 &&
-      analysis().fusion_roots().front()->shape().IsTuple()) {
-    // This is a variadic reduce. The root indices are the same for all
-    // elements.
-    int num_elements =
-        analysis().fusion_roots().front()->shape().tuple_shapes_size();
-    root_output_indices.reserve(num_elements);
-    for (int i = 0; i < num_elements - 1; ++i) {
-      root_output_indices.push_back(root_output_indices.front());
-    }
-  }
-
-  auto thread_has_output =
-      mlir_converter::CheckConstraints(*ComputeThreadIdToOutputIndexing(0, ctx),
-                                       thread_and_block_indices, {}, builder);
-
-  llvm::DenseMap<const HloInstruction*, SmallVector<Value>> inits;
-  for (auto [index, hero] : llvm::enumerate(reduction_heroes_)) {
-    int num_inputs = hero->operand_count() / 2;
-    const auto& computation =
-        state.computations.FindPartitionedComputation(hero->parent());
-    inits[hero] = ProvideParameterRange(
-        computation.FindSubgraph(hero), hero, num_inputs, num_inputs, {},
-        state.call_target, state.entry_function, builder);
-  }
-
-  auto evaluate_epilogue =
-      [&](SmallVector<SmallVector<Value>> results) -> mlir::ValueRange {
-    if (!state.computations.epilogue()) {
-      return results.front();
-    }
-
-    llvm::SmallVector<Value> hero_values(reduction_heroes_.size());
-    const auto& injected = state.computations.epilogue()->injected_values;
-    for (auto [hero, result] : llvm::zip(reduction_heroes_, results)) {
-      CHECK(result.size() == 1)
-          << "Epilogue fusions are not supported with variadic reduce.";
-      hero_values[injected.at(hero)] = result.front();
-    }
-
-    llvm::SmallVector<Value> indices = EmitThreadAndBlockIds(builder);
-    int num_symbols =
-        state.computations.epilogue()->root_indexing.front().getNumSymbols();
-    for (int i = 0; i < num_symbols; ++i) {
-      indices.push_back(zero);
-    }
-
-    return EmitEpilogue(state.computations, state.entry_function, hero_values,
-                        indices, builder);
-  };
-
-  SmallVector<Value> updated_outputs;
-  SmallVector<llvm::SmallVector<Value>> results;
-  for (auto* hero : reduction_heroes_) {
-    auto input_indexing = ComputeThreadIdToInputIndexing(
-        reduction_roots_.at(hero).front(), 0, ctx);
-    TF_ASSIGN_OR_RETURN(
-        auto accumulated,
-        state.EmitPerThreadReducedElements(*input_indexing, hero, inits[hero]));
-
-    // In row reductions, we can do a warp shuffle before writing to shared
-    // memory. In column reductions, the members of the warp process different
-    // output elements, so we need to transpose first.
-    if (reduction_info().IsRowReduction()) {
-      auto reducer = state.GetReducer(hero);
-      int max_dist = WarpSize() / 2 / reduction_info().GetRowsPerWarp();
-      accumulated =
-          builder.create<ShuffleReduceOp>(reducer, accumulated, max_dist)
-              .getResults();
-    }
-
-    results.push_back(accumulated);
-  }
-
-  if (use_shared) {
-    // Write results to shared memory.
-    for (auto [hero, result] : llvm::zip(reduction_heroes_, results)) {
-      auto dest = state.AllocateSharedTiles(hero, shared_tile_size);
-      for (auto [value, output] : llvm::zip(result, dest)) {
-        updated_outputs.push_back(builder.create<PredicatedInsertOp>(
-            shared_write_condition, value, output, shared_write_indices));
+    llvm::SmallVector<Value> epilogue_input_symbols(
+        epilogue.root_indexing.front().GetAffineMap().getNumSymbols(), zero);
+    auto epilogue_input_indices = state.thread_and_block_ids;
+    epilogue_input_indices.append(epilogue_input_symbols);
+    auto values =
+        EmitEpilogue(group_id, state.computations, state.entry_function,
+                     results, epilogue_input_indices, b);
+    int first_root_index = state.OutputIndex(epilogue.roots.front(), 0);
+    auto thread_has_output = mlir_converter::CheckConstraints(
+        *ComputeThreadIdToOutputIndexing(first_root_index, ctx),
+        state.thread_and_block_ids, {}, b);
+    for (auto [index, root] : llvm::enumerate(epilogue.roots)) {
+      auto output_indices = mlir_converter::ApplyIndexing(
+          epilogue.root_indexing[index], state.thread_and_block_ids,
+          epilogue_input_symbols, b);
+      for (auto [result_index, result] : llvm::enumerate(values.at(root))) {
+        auto& output = outputs[state.OutputIndex(root, result_index)];
+        output = b.create<PredicatedInsertOp>(thread_has_output, result, output,
+                                              output_indices);
       }
     }
-  } else {
-    // Evaluate the epilogue, if there is one.
-    auto result_scalars = evaluate_epilogue(results);
-    for (auto [value, output, indices] :
-         llvm::zip(result_scalars, output_args, root_output_indices)) {
-      updated_outputs.push_back(builder.create<PredicatedInsertOp>(
-          thread_has_output, value, output, indices));
+    return outputs;
+  };
+
+  HloValueMap inits;
+  const auto& reductions = reduction_heroes_[group_id];
+  for (auto* hero : reductions) {
+    int arity = hero->operand_count() / 2;
+    inits[hero] =
+        ProvideParameterRange(state.computation, hero, arity, arity, {},
+                              state.call_target, state.entry_function, b);
+  }
+  llvm::SmallVector<Value> outputs =
+      mlir::ValueRange(state.entry_function.getArguments().drop_front(
+          state.fusion.fused_parameters().size()));
+  for (auto* side_output : side_output_roots_[group_id]) {
+    inits[side_output].push_back(outputs[state.OutputIndex(side_output, 0)]);
+  }
+
+  auto accumulated = state.EmitPerThreadReducedElements(group_id, inits);
+  for (auto root : side_output_roots_[group_id]) {
+    outputs[state.OutputIndex(root, 0)] = accumulated[root].front();
+  }
+
+  // In row reductions, we can do a warp shuffle before writing to shared
+  // memory. In column reductions, the members of the warp process different
+  // output elements, so we need to transpose first.
+  if (reduction_info().IsRowReduction()) {
+    for (auto* reduction : reductions) {
+      auto reducer = state.GetReducer(reduction);
+      int max_dist = WarpSize() / 2 / reduction_info().GetRowsPerWarp();
+      auto& values = accumulated[reduction];
+      values =
+          b.create<ShuffleReduceOp>(reducer, values, max_dist).getResults();
     }
-    builder.create<mlir::func::ReturnOp>(updated_outputs);
-    return absl::OkStatus();
+  }
+
+  if (shared_tile_size.empty()) {
+    return evaluate_epilogue(accumulated, std::move(outputs));
+  }
+
+  SmallVector<Value> shared_tiles;
+  // Write results to shared memory.
+  for (auto* hero : reductions) {
+    auto dest = state.AllocateSharedTiles(hero, shared_tile_size);
+    for (auto [value, output] : llvm::zip(accumulated[hero], dest)) {
+      shared_tiles.push_back(b.create<PredicatedInsertOp>(
+          shared_write_condition, value, output, shared_write_indices));
+    }
   }
 
   // Wait for the entire tile to be written.
-  auto shared_tiles = builder
-                          .create<SyncThreadsOp>(
-                              mlir::TypeRange(updated_outputs), updated_outputs)
-                          .getResults();
+  auto synced_tiles =
+      b.create<SyncThreadsOp>(mlir::TypeRange(shared_tiles), shared_tiles)
+          .getResults();
   auto write_outputs = [&](mlir::OpBuilder then_builder, mlir::Location loc) {
-    results.clear();
     mlir::ImplicitLocOpBuilder b(loc, then_builder);
     int tile_index = 0;
-    llvm::SmallVector<Value> updated_outputs;
-    for (auto* hero : reduction_heroes_) {
+    for (auto* hero : reductions) {
       // Load from shared memory.
       SmallVector<Value> reduced;
       for (auto init : inits[hero]) {
         // If a warp didn't write anything, use the init values instead.
         reduced.push_back(b.create<PredicatedExtractOp>(
                                shared_read_condition, init,
-                               shared_tiles[tile_index++], shared_read_indices)
+                               synced_tiles[tile_index++], shared_read_indices)
                               .getResult());
       }
-
-      reduced = builder
-                    .create<ShuffleReduceOp>(state.GetReducer(hero), reduced,
-                                             WarpSize() / 2)
-                    .getResults();
-      results.push_back(reduced);
+      const auto& reducer = state.GetReducer(hero);
+      accumulated[hero] =
+          b.create<ShuffleReduceOp>(reducer, reduced, WarpSize() / 2)
+              .getResults();
     }
 
-    auto result_scalars = evaluate_epilogue(results);
-
-    for (auto [output_value, dest, indices] :
-         llvm::zip(result_scalars, output_args, root_output_indices)) {
-      updated_outputs.push_back(b.create<PredicatedInsertOp>(
-          thread_has_output, output_value, dest, indices));
-    }
-    b.create<mlir::scf::YieldOp>(loc, updated_outputs);
+    b.create<mlir::scf::YieldOp>(loc, evaluate_epilogue(accumulated, outputs));
   };
 
-  auto warp_writes = reduction_info().IsRowReduction()
-                         ? builder.create<mlir::arith::CmpIOp>(
-                               mlir::arith::CmpIPredicate::eq, warp_id, zero)
-                         : cstTrue;
-  auto written = builder.create<mlir::scf::IfOp>(
-      warp_writes, write_outputs, [&](mlir::OpBuilder b, mlir::Location loc) {
-        b.create<mlir::scf::YieldOp>(loc, output_args);
-      });
-  builder.create<mlir::func::ReturnOp>(written.getResults());
-
-  return absl::OkStatus();
+  auto warp_writes =
+      reduction_info().IsRowReduction()
+          ? b.create<ma::CmpIOp>(ma::CmpIPredicate::eq, warp_id, zero)
+          : cst_true;
+  auto yield_outputs = [&](mlir::OpBuilder else_builder, mlir::Location loc) {
+    else_builder.create<mlir::scf::YieldOp>(loc, outputs);
+  };
+  return b.create<mlir::scf::IfOp>(warp_writes, write_outputs, yield_outputs)
+      .getResults();
 }
 
-absl::StatusOr<SmallVector<Value>>
-MlirReductionFusion::EmitterState::EmitPerThreadReducedElements(
-    const IndexingMap& input_indexing, const HloInstruction* hero,
-    ValueRange inits) {
-  auto body_builder = [&](ValueRange outputs, ValueRange dim_values,
-                          ValueRange symbol_values) -> SmallVector<Value> {
-    auto indices = mlir_converter::ApplyAffineMap(
-        input_indexing.GetAffineMap(), dim_values, symbol_values, builder);
-    auto operands = FusionParams();
-    absl::c_copy(indices, std::back_inserter(operands));
-    auto values = ProvideParameterRange(computations.FindSubgraph(hero), hero,
-                                        0, hero->operand_count() / 2, indices,
-                                        call_target, entry_function, builder);
+HloValueMap MlirReductionFusion::EmitterState::EmitPerThreadReducedElements(
+    int group_id, const HloValueMap& inits) {
+  const auto& tiling = owner.reduction_info().GetTiling();
+  auto tile_indexing = GetIndexingMapForTiling(tiling, builder.getContext());
+  tile_indexing
+      .GetMutableDimensionBound(
+          KernelFusionInterface::kIndexingMapBlockIdxDims[1])
+      .upper = owner.reduction_heroes_.size();
 
-    SmallVector<Value> reduce_args = outputs;
-    reduce_args.append(values.begin(), values.end());
-    return builder.create<PureCallOp>(GetReducer(hero), reduce_args)
-        .getResults();
+  SmallVector<Value> iter_arg_inits;
+  const auto& side_outputs = owner.side_output_roots_[group_id];
+  const auto& reductions = owner.reduction_heroes_[group_id];
+  absl::flat_hash_map<const HloInstruction*, int> iter_arg_starts;
+  for (const auto& [hero, init] : inits) {
+    iter_arg_starts[hero] = iter_arg_inits.size();
+    iter_arg_inits.append(init);
+  }
+
+  auto body_builder = [&](ValueRange iter_args, ValueRange dim_values,
+                          ValueRange symbol_values) -> SmallVector<Value> {
+    auto tile_indices = mlir_converter::ApplyIndexing(tile_indexing, dim_values,
+                                                      symbol_values, builder);
+
+    llvm::SmallVector<Value> results(iter_args.size(), nullptr);
+    auto get_input_indices = [&](auto* hero, bool is_reduction) {
+      const auto& input_shape =
+          is_reduction ? hero->operand(0)->shape() : hero->shape();
+      return mlir_converter::ApplyIndexing(
+          GetBitcastMap(tiling.GetXlaShape(), input_shape,
+                        builder.getContext()),
+          tile_indices, {}, builder);
+    };
+    for (auto* reduction : reductions) {
+      int arity = reduction->operand_count() / 2;
+      int start = iter_arg_starts[reduction];
+      SmallVector<Value> reduce_args = iter_args.slice(start, arity);
+      reduce_args.append(ProvideParameterRange(
+          computation, reduction, 0, arity, get_input_indices(reduction, true),
+          call_target, entry_function, builder));
+      const auto& reducer = GetReducer(reduction);
+      absl::c_copy(
+          builder.create<PureCallOp>(reducer, reduce_args).getResults(),
+          results.begin() + start);
+    }
+    struct SideOutput {
+      llvm::SmallVector<Value> indices;
+      Value scalar;
+    };
+    llvm::SmallVector<SideOutput> side_output_values;
+    for (auto* side_output : side_outputs) {
+      auto indices = get_input_indices(side_output, false);
+      auto* root_tuple = fusion.fused_expression_root();
+      Value value = mlir_converter::ProvideParameter(
+          computation, root_tuple, root_tuple->operand_index(side_output),
+          indices, call_target, entry_function, builder)[0];
+      side_output_values.push_back({std::move(indices), value});
+    }
+    for (const auto& [side_output, values] :
+         llvm::zip(side_outputs, side_output_values)) {
+      int offset = iter_arg_starts[side_output];
+      results[offset] = builder.create<mlir::tensor::InsertOp>(
+          values.scalar, iter_args[offset], values.indices);
+    }
+    return results;
   };
-  return owner.EmitThreadLoopNest(builder, inits, input_indexing, body_builder);
+
+  auto results_vector = owner.EmitThreadLoopNest(builder, iter_arg_inits,
+                                                 tile_indexing, body_builder);
+  mlir::ValueRange results = results_vector;
+  HloValueMap results_per_hero;
+  for (const auto& [hero, init] : inits) {
+    results_per_hero[hero] = results.slice(iter_arg_starts[hero], init.size());
+  }
+  return results_per_hero;
 }
 
 SmallVector<Value> MlirReductionFusion::EmitterState::AllocateSharedTiles(

@@ -200,14 +200,16 @@ void HostCallbackTrampoline(void* ctx, TF_Status* status) {
   delete host_ctx;
 }
 
-class CStreamExecutor : public StreamExecutorInterface {
+class CStreamExecutor : public StreamExecutor {
  public:
-  explicit CStreamExecutor(SP_Device device, SP_DeviceFns* device_fns,
+  explicit CStreamExecutor(Platform* se_platform, SP_Device device,
+                           SP_DeviceFns* device_fns,
                            SP_StreamExecutor* stream_executor,
                            SP_Platform* platform, SP_PlatformFns* platform_fns,
                            SP_TimerFns* timer_fns, const std::string& name,
                            int visible_device_count)
-      : device_(std::move(device)),
+      : StreamExecutor(se_platform),
+        device_(std::move(device)),
         device_fns_(device_fns),
         stream_executor_(stream_executor),
         platform_(platform),
@@ -405,10 +407,6 @@ class CStreamExecutor : public StreamExecutorInterface {
     return stream_executor_->host_callback(&device_, stream_handle,
                                            &HostCallbackTrampoline, ctx);
   }
-  absl::Status AllocateEvent(Event* event) override {
-    DCHECK(event != nullptr);
-    return static_cast<CEvent*>(event->implementation())->Create();
-  }
   absl::Status DeallocateEvent(Event* event) override {
     static_cast<CEvent*>(event->implementation())->Destroy();
     return absl::OkStatus();
@@ -435,14 +433,6 @@ class CStreamExecutor : public StreamExecutorInterface {
     SE_EventStatus event_status =
         stream_executor_->get_event_status(&device_, event_handle);
     return SEEventStatusToEventStatus(event_status);
-  }
-  bool AllocateStream(Stream* stream) override {
-    DCHECK(stream != nullptr);
-    absl::Status status =
-        static_cast<CStream*>(stream->implementation())->Create();
-    // TODO(annarev): update AllocateStream to return status instead
-    // (similar to AllocateEvent).
-    return status.ok();
   }
   void DeallocateStream(Stream* stream) override {
     static_cast<CStream*>(stream->implementation())->Destroy();
@@ -557,15 +547,19 @@ class CStreamExecutor : public StreamExecutorInterface {
     return builder.Build();
   }
 
-  // Each call creates a new instance of the platform-specific implementation of
-  // the corresponding interface type.
-  std::unique_ptr<EventInterface> CreateEventImplementation() override {
-    return std::unique_ptr<EventInterface>(
-        new CEvent(&device_, stream_executor_));
+  absl::StatusOr<std::unique_ptr<Event>> CreateEvent() override {
+    auto c_event = std::make_unique<CEvent>(&device_, stream_executor_);
+    TF_RETURN_IF_ERROR(c_event->Create());
+    return std::make_unique<Event>(this, std::move(c_event));
   }
-  std::unique_ptr<StreamInterface> GetStreamImplementation() override {
-    return std::unique_ptr<StreamInterface>(
-        new CStream(&device_, stream_executor_));
+
+  absl::StatusOr<std::unique_ptr<Stream>> CreateStream(
+      std::optional<std::variant<StreamPriority, int>> priority =
+          std::nullopt) override {
+    auto c_stream = std::make_unique<CStream>(&device_, stream_executor_);
+    TF_RETURN_IF_ERROR(c_stream->Create());
+    auto stream = std::make_unique<Stream>(this, std::move(c_stream));
+    return std::move(stream);
   }
 
  private:
@@ -644,11 +638,9 @@ absl::StatusOr<std::unique_ptr<StreamExecutor>> CPlatform::GetUncachedExecutor(
                                  c_status.get());
   TF_RETURN_IF_ERROR(StatusFromTF_Status(c_status.get()));
 
-  auto executor = std::make_unique<CStreamExecutor>(
-      std::move(device), &device_fns_, &stream_executor_, &platform_,
+  return std::make_unique<CStreamExecutor>(
+      this, std::move(device), &device_fns_, &stream_executor_, &platform_,
       &platform_fns_, &timer_fns_, name_, visible_device_count);
-  auto result = std::make_unique<StreamExecutor>(this, std::move(executor));
-  return result;
 }
 
 absl::Status InitStreamExecutorPlugin(void* dso_handle,

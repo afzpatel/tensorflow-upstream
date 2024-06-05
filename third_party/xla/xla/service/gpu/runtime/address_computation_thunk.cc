@@ -54,7 +54,7 @@ AddressComputationThunk::AddressComputationThunk(
     std::vector<std::optional<uint64_t>> offset_byte_sizes)
     : Thunk(Kind::kAddressComputation, thunk_info),
       embedded_thunk_(std::make_unique<SequentialThunk>(
-          ThunkInfo(thunk_info.op), std::move(*embedded_thunk))),
+          ThunkInfo(), std::move(*embedded_thunk))),
       embedded_thunk_arguments_(std::move(arguments)),
       fake_allocations_(std::move(fake_allocations)),
       offset_buffer_indices_(std::move(offset_buffer_indices)),
@@ -194,8 +194,7 @@ absl::Status AddressComputationThunk::ExecuteOnStream(
   // of bigger ones allocated elsewhere.
   BufferAllocations new_allocations(new_buffers,
                                     orig_allocations.device_ordinal(),
-                                    orig_allocations.memory_allocator(),
-                                    orig_allocations.external_allocations());
+                                    orig_allocations.memory_allocator());
 
   Thunk::ExecuteParams new_params =
       Thunk::ExecuteParams::CloneWithNewAllocations(params, new_allocations);

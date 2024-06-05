@@ -158,8 +158,8 @@ std::optional<GroupedByOpIndexingMap> GetThreadIdToInputMemoryLayoutsMaps(
   for (const auto& [root_index, hero] :
        llvm::enumerate(fusion_analysis.fusion_heroes())) {
     for (const auto& [hero_operand_index, hero_operand] :
-         llvm::enumerate(hero->operands())) {
-      if (hero_operand->shape().rank() == 0) {
+         llvm::enumerate(hero.GetOperands())) {
+      if (hero_operand.shape().rank() == 0) {
         continue;
       }
       // Compute thread ID -> hero operand indexing map.
@@ -170,10 +170,9 @@ std::optional<GroupedByOpIndexingMap> GetThreadIdToInputMemoryLayoutsMaps(
         return std::nullopt;
       }
       // Compute indexing from output to inputs for logical layout.
-      HloInstructionAdaptor hero_operand_adaptor(*hero_operand);
       GroupedByOpIndexingMap instr_indexing_keyed_by_operands =
-          ComputeGroupedOutputToInputIndexing(
-              fusion_adaptor, hero_operand_adaptor, mlir_context);
+          ComputeGroupedOutputToInputIndexing(fusion_adaptor, hero_operand,
+                                              mlir_context);
       // For every operand compute thread ID -> physical layout of operand
       // indexing map.
       for (const HloInstruction* operand : operands) {
@@ -262,19 +261,19 @@ void AssignValuesToOuterLoopIVs(IndexingMap* indexing_map) {
   }
   MLIRContext* mlir_context = indexing_map->GetMLIRContext();
   llvm::SmallVector<AffineExpr, 2> symbol_replacements;
-  for (const RangeVar& range_var : indexing_map->GetRangeVars()) {
-    symbol_replacements.push_back(
-        getAffineConstantExpr(range_var.range.lower, mlir_context));
+  for (int64_t symbol_id = 0; symbol_id < indexing_map->GetRangeVarsCount() - 1;
+       ++symbol_id) {
+    symbol_replacements.push_back(getAffineConstantExpr(
+        indexing_map->GetRangeVar(symbol_id).range.lower, mlir_context));
   }
-  symbol_replacements.push_back(mlir::getAffineSymbolExpr(
-      indexing_map->GetRangeVarsCount() - 1, mlir_context));
+  symbol_replacements.push_back(mlir::getAffineSymbolExpr(0, mlir_context));
 
   AffineMap thread_x_to_input_no_dim_symbols =
       indexing_map->GetAffineMap().replaceDimsAndSymbols(
           {}, symbol_replacements, indexing_map->GetDimVarsCount(), 1);
   *indexing_map = IndexingMap{thread_x_to_input_no_dim_symbols,
                               indexing_map->GetDimVars(),
-                              indexing_map->GetRangeVars(),
+                              {indexing_map->GetRangeVars().back()},
                               {}};
   indexing_map->Simplify(GetIndexingMapForInstruction);
   indexing_map->RemoveUnusedSymbols();
@@ -592,10 +591,11 @@ CoalescingAnalysis::CoalescingAnalysis(
     const HloFusionAnalysis& fusion_analysis,
     KernelFusionInterface* fusion_interface, MLIRContext* mlir_context,
     bool use_heuristic) {
-  ProducerConsumerFusion fusion_adaptor(producer, consumer);
-  if (!use_heuristic &&
-      ComputeCoalescingForAllOperands(fusion_adaptor, operands, fusion_analysis,
-                                      fusion_interface, mlir_context)) {
+  auto fusion_adaptor =
+      HloFusionAdaptor::ForProducerConsumer(producer, consumer);
+  if (!use_heuristic && ComputeCoalescingForAllOperands(
+                            *fusion_adaptor, operands, fusion_analysis,
+                            fusion_interface, mlir_context)) {
     return;
   }
   // If ComputeCoalescingForAllOperands fails, fallback to using the heuristic.

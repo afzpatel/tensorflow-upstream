@@ -36,9 +36,7 @@ limitations under the License.
 #include "xla/stream_executor/tpu/c_api_conversions.h"
 #include "xla/stream_executor/tpu/c_api_decl.h"
 #include "xla/stream_executor/tpu/noncopyable_buffer.h"
-#include "xla/stream_executor/tpu/proto_helper.h"
 #include "xla/stream_executor/tpu/status_helper.h"
-#include "xla/stream_executor/tpu/tpu_api.h"
 #include "xla/stream_executor/tpu/tpu_executor.h"
 #include "xla/stream_executor/tpu/tpu_executor_api.h"
 #include "xla/stream_executor/tpu/tpu_executor_c_api.h"
@@ -49,9 +47,6 @@ limitations under the License.
 
 namespace tensorflow {
 namespace tpu {
-
-template <typename T>
-using StatusOr = absl::StatusOr<T>;
 
 TpuTransferManager::TpuTransferManager() {
   manager_ = stream_executor::tpu::ExecutorApiFn()->TpuTransferManager_NewFn();
@@ -110,8 +105,8 @@ absl::Status TpuTransferManager::TransferLiteralToInfeed(
   StatusHelper status;
   XLA_Literal c_literal;
   ApiConverter::ToC(literal, &c_literal);
-  auto* tpu_executor = static_cast<stream_executor::tpu::TpuExecutor*>(
-      executor->implementation());
+  auto* tpu_executor =
+      static_cast<stream_executor::tpu::TpuExecutor*>(executor);
 
   stream_executor::tpu::ExecutorApiFn()
       ->TpuTransferManager_TransferLiteralToInfeedFn(
@@ -126,8 +121,8 @@ absl::Status TpuTransferManager::TransferBuffersToInfeed(
     se::StreamExecutor* executor,
     const std::deque<tensorflow::tpu::NoncopyableBuffer>& buffers) {
   StatusHelper status;
-  auto* tpu_executor = static_cast<stream_executor::tpu::TpuExecutor*>(
-      executor->implementation());
+  auto* tpu_executor =
+      static_cast<stream_executor::tpu::TpuExecutor*>(executor);
 
   std::vector<int64_t> buffers_size;
   std::vector<uint32_t*> buffers_array;
@@ -154,8 +149,8 @@ absl::Status TpuTransferManager::TransferLiteralFromOutfeed(
   StatusHelper status;
   XLA_Shape c_shape;
   XLA_Literal c_literal;
-  auto* tpu_executor = static_cast<stream_executor::tpu::TpuExecutor*>(
-      executor->implementation());
+  auto* tpu_executor =
+      static_cast<stream_executor::tpu::TpuExecutor*>(executor);
 
   ApiConverter::ToC(literal.shape(), &c_shape);
   ApiConverter::ToC(literal, &c_literal);
@@ -177,8 +172,7 @@ absl::Status TpuTransferManager::ResetDevices(
   std::vector<SE_StreamExecutor*> se;
   se.reserve(executor.size());
   for (int64_t i = 0; i < executor.size(); ++i) {
-    se.push_back(static_cast<stream_executor::tpu::TpuExecutor*>(
-                     executor[i]->implementation())
+    se.push_back(static_cast<stream_executor::tpu::TpuExecutor*>(executor[i])
                      ->se_executor());
   }
 
@@ -249,7 +243,7 @@ int64_t TpuTransferManager::GetByteSizeRequirement(
   return size_in_bytes;
 }
 
-StatusOr<xla::Shape> TpuTransferManager::ChooseCompactLayoutForShape(
+absl::StatusOr<xla::Shape> TpuTransferManager::ChooseCompactLayoutForShape(
     const xla::Shape& host_shape) const {
   XLA_Shape c_host_shape;
   ApiConverter::ToC(host_shape, &c_host_shape);
@@ -272,8 +266,7 @@ StatusOr<xla::Shape> TpuTransferManager::ChooseCompactLayoutForShape(
 bool TpuTransferManager::CanShapedBufferBeAccessedNow(
     stream_executor::StreamExecutor* executor,
     const xla::ShapedBuffer& device_buffer) const {
-  auto* tpu_executor =
-      down_cast<stream_executor::tpu::TpuExecutor*>(executor->implementation());
+  auto* tpu_executor = down_cast<stream_executor::tpu::TpuExecutor*>(executor);
   XLA_ShapedBuffer c_device_buffer;
   ApiConverter::ToC(device_buffer, &c_device_buffer);
   absl::Cleanup cleanup = [&c_device_buffer]() {
@@ -287,8 +280,7 @@ bool TpuTransferManager::CanShapedBufferBeAccessedNow(
 bool TpuTransferManager::CanBufferBeAccessedNow(
     se::StreamExecutor* executor,
     const se::DeviceMemoryBase& device_buffer) const {
-  auto* tpu_executor =
-      down_cast<stream_executor::tpu::TpuExecutor*>(executor->implementation());
+  auto* tpu_executor = down_cast<stream_executor::tpu::TpuExecutor*>(executor);
   SE_DeviceMemoryBase c_device_buffer{const_cast<void*>(device_buffer.opaque()),
                                       device_buffer.size(),
                                       device_buffer.payload()};

@@ -77,6 +77,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/lite/ir/tfl_ops.h"
 #include "tensorflow/compiler/mlir/lite/offset_buffer.h"
 #include "tensorflow/compiler/mlir/lite/quantization/ir/QuantOps.h"
+#include "tensorflow/compiler/mlir/lite/schema/mutable/schema_generated.h"
 #include "tensorflow/compiler/mlir/lite/stablehlo/transforms/passes.h"
 #include "tensorflow/compiler/mlir/lite/utils/const_tensor_utils.h"
 #include "tensorflow/compiler/mlir/lite/utils/convert_type.h"
@@ -96,7 +97,6 @@ limitations under the License.
 #include "tensorflow/lite/experimental/remat/metadata_util.h"
 #include "tensorflow/lite/graph_info.h"
 #include "tensorflow/lite/model_builder.h"
-#include "tensorflow/lite/schema/mutable/schema_generated.h"
 #include "tensorflow/lite/schema/schema_utils.h"
 #include "tsl/platform/status.h"
 #include "tsl/platform/statusor.h"
@@ -770,6 +770,20 @@ StatusOr<Operation*> ConvertOp(
     mlir::BuiltinOptionsToAttributes(op.builtin_options, builder, attrs);
     mlir::BuiltinOptions2ToAttributes(op.builtin_options_2, builder, attrs);
   }
+
+  if (builtin_code == tflite::BuiltinOperator_STABLEHLO_COMPOSITE) {
+    auto composite_options = op.builtin_options_2.AsStableHLOCompositeOptions();
+    std::string decomposition = "";
+    if (composite_options->decomposition_subgraph_index > -1) {
+      decomposition =
+          func_names.at(composite_options->decomposition_subgraph_index);
+    }
+
+    attrs.emplace_back(builder.getNamedAttr(
+        "decomposition",
+        mlir::vhlo::StringV1Attr::get(builder.getContext(), decomposition)));
+  }
+
   op_state.addAttributes(attrs);
 
   // Handle the conversion from subgraph index to functions for If and While. We

@@ -32,6 +32,7 @@ limitations under the License.
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/AffineExpr.h"  // from @llvm-project
 #include "mlir/IR/AffineMap.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
@@ -59,6 +60,7 @@ using mlir::AffineMap;
 using mlir::AffineSymbolExpr;
 using mlir::getAffineBinaryOpExpr;
 using mlir::getAffineConstantExpr;
+using mlir::getAffineDimExpr;
 using mlir::MLIRContext;
 
 class AffineExprSimplifier {
@@ -85,12 +87,13 @@ class AffineExprSimplifier {
   // - Rewrites a / 100 to 0 when a is known to be less than 100.
   mlir::AffineExpr RewriteFloorDiv(mlir::AffineBinaryOpExpr div);
 
-  mlir::AffineExpr RewriteSum(
-      mlir::AffineExpr expr,
-      const std::function<mlir::AffineExpr(mlir::AffineExpr)>& map);
-
-  mlir::AffineExpr RewriteSumIf(
+  // Removes summands from arbitrarily nested sums (e.g, ((a+b)+c)) if `pred`
+  // returns true. In this example, `pred` is evaluated on `a`, `b` and `c`, not
+  // on `a+b`.
+  mlir::AffineExpr RemoveSummands(
       mlir::AffineExpr expr, const std::function<bool(mlir::AffineExpr)>& pred);
+  void VisitSummands(mlir::AffineExpr expr,
+                     const std::function<void(mlir::AffineExpr)>& visit);
 
   // Attempts to simplify the expression, but doesn't attempt to simplify the
   // result further.
@@ -146,45 +149,48 @@ AffineExpr AffineExprSimplifier::RewriteMod(AffineBinaryOpExpr mod) {
            *mul;
   }
 
-  Interval no_multiplier_range{0, 0};
-  int64_t multiplier_gcd = -1;
-
   int64_t extracted_constant = 0;
-  auto new_lhs = RewriteSumIf(lhs_simplified, [&](AffineExpr expr) {
+  auto new_lhs = RemoveSummands(lhs_simplified, [&](AffineExpr expr) {
     if (auto cst = mlir::dyn_cast<AffineConstantExpr>(expr);
         cst && cst.getValue() >= m) {
       extracted_constant += cst.getValue();
-      return false;
+      return true;
     }
     if (auto multiplier = GetConstantRhs(expr, AffineExprKind::Mul)) {
       if (*multiplier % m == 0) {
-        return false;
+        return true;
       }
+    }
+    return false;
+  });
+  new_lhs = new_lhs + (extracted_constant % m);
 
+  Interval no_multiplier_range{0, 0};
+  int64_t multiplier_gcd = -1;
+  VisitSummands(new_lhs, [&](AffineExpr expr) {
+    if (auto multiplier = GetConstantRhs(expr, AffineExprKind::Mul)) {
       if (multiplier_gcd == -1) {
         multiplier_gcd = *multiplier;
       } else {
         multiplier_gcd = std::gcd(multiplier_gcd, *multiplier);
       }
-      return true;
+    } else {
+      auto range = range_evaluator_->ComputeExpressionRange(expr);
+      no_multiplier_range.lower += range.lower;
+      no_multiplier_range.upper += range.upper;
     }
-    auto range = range_evaluator_->ComputeExpressionRange(expr);
-    no_multiplier_range.lower += range.lower;
-    no_multiplier_range.upper += range.upper;
-    return true;
   });
-  new_lhs = new_lhs + (extracted_constant % m);
 
   mlir::AffineExpr extracted = getAffineConstantExpr(0, mod.getContext());
   if (m % multiplier_gcd == 0 && no_multiplier_range.lower >= 0 &&
       no_multiplier_range.upper < multiplier_gcd) {
     // Remove everything that doesn't have a multiplier.
-    new_lhs = RewriteSumIf(new_lhs, [&](AffineExpr expr) {
+    new_lhs = RemoveSummands(new_lhs, [&](AffineExpr expr) {
       if (GetConstantRhs(expr, AffineExprKind::Mul)) {
-        return true;
+        return false;
       }
       extracted = extracted + expr;
-      return false;
+      return true;
     });
   }
   return new_lhs % mod.getRHS() + extracted;
@@ -239,40 +245,22 @@ AffineExpr AffineExprSimplifier::RewriteFloorDiv(AffineBinaryOpExpr div) {
   }
 
   Interval no_multiplier_range{0, 0};
-  int64_t multiplier_gcd = -1;
-  // The maximum GCD of any remaining multiplier inside the div and the divisor.
-  int64_t max_remaining_multiplier_gcd = -1;
   AffineExpr zero = getAffineConstantExpr(0, mlir_context);
   AffineExpr extracted = zero;
-  auto new_dividend = RewriteSumIf(lhs_simplified, [&](AffineExpr expr) {
+  auto new_dividend = RemoveSummands(lhs_simplified, [&](AffineExpr expr) {
     if (auto multiplier = GetConstantRhs(expr, AffineExprKind::Mul)) {
       // (x * 7 + ...) / 3 -> can't extract. We could extract x * 2 and keep
       // one x, but we currently have no reason to do that.
-
       if (*multiplier % d == 0) {
         int64_t factor = *multiplier / d;
         extracted =
             extracted + mlir::cast<AffineBinaryOpExpr>(expr).getLHS() * factor;
         // Remove from dividend.
-        return false;
-      }
-
-      if (*multiplier > 0) {
-        if (multiplier_gcd == -1) {
-          multiplier_gcd = *multiplier;
-        } else {
-          multiplier_gcd = std::gcd(multiplier_gcd, *multiplier);
-        }
-        max_remaining_multiplier_gcd =
-            std::max(max_remaining_multiplier_gcd, std::gcd(*multiplier, d));
         return true;
       }
     }
-    auto range = range_evaluator_->ComputeExpressionRange(expr);
-    no_multiplier_range.lower += range.lower;
-    no_multiplier_range.upper += range.upper;
     // Not a constant multiplier, keep in dividend.
-    return true;
+    return false;
   });
 
   // If we removed everything, skip the div.
@@ -280,13 +268,32 @@ AffineExpr AffineExprSimplifier::RewriteFloorDiv(AffineBinaryOpExpr div) {
     return extracted;
   }
 
+  int64_t multiplier_gcd = -1;
+  // The maximum GCD of any remaining multiplier inside the div and the divisor.
+  int64_t max_remaining_multiplier_gcd = -1;
+  VisitSummands(new_dividend, [&](AffineExpr summand) {
+    if (auto multiplier = GetConstantRhs(summand, AffineExprKind::Mul)) {
+      if (multiplier_gcd == -1) {
+        multiplier_gcd = *multiplier;
+      } else {
+        multiplier_gcd = std::gcd(multiplier_gcd, *multiplier);
+      }
+      max_remaining_multiplier_gcd =
+          std::max(max_remaining_multiplier_gcd, std::gcd(*multiplier, d));
+    } else {
+      auto range = range_evaluator_->ComputeExpressionRange(summand);
+      no_multiplier_range.lower += range.lower;
+      no_multiplier_range.upper += range.upper;
+    }
+  });
+
   if ((d % multiplier_gcd) == 0) {
     if (no_multiplier_range.lower >= 0 &&
         no_multiplier_range.upper < multiplier_gcd) {
       // Remove everything that doesn't have a multiplier.
-      new_dividend = RewriteSumIf(new_dividend, [&](AffineExpr expr) {
+      new_dividend = RemoveSummands(new_dividend, [&](AffineExpr expr) {
         auto mult = GetConstantRhs(expr, AffineExprKind::Mul);
-        return mult.has_value();
+        return !mult.has_value();
       });
     }
   }
@@ -295,7 +302,7 @@ AffineExpr AffineExprSimplifier::RewriteFloorDiv(AffineBinaryOpExpr div) {
   // (x * 128 + y) // 192 -> (x * 2 + y // 64) // 3
   if (max_remaining_multiplier_gcd > 1) {
     AffineExpr partially_extracted = getAffineConstantExpr(0, mlir_context);
-    new_dividend = RewriteSumIf(new_dividend, [&](AffineExpr expr) {
+    new_dividend = RemoveSummands(new_dividend, [&](AffineExpr expr) {
       if (auto multiplier = GetConstantRhs(expr, AffineExprKind::Mul);
           multiplier && (*multiplier > 0) &&
           ((*multiplier % max_remaining_multiplier_gcd) == 0)) {
@@ -304,9 +311,9 @@ AffineExpr AffineExprSimplifier::RewriteFloorDiv(AffineBinaryOpExpr div) {
             partially_extracted +
             expr_lhs * (*multiplier / max_remaining_multiplier_gcd);
         // Remove from dividend.
-        return false;
+        return true;
       }
-      return true;
+      return false;
     });
     return extracted + (partially_extracted +
                         new_dividend.floorDiv(max_remaining_multiplier_gcd))
@@ -335,27 +342,92 @@ std::optional<int64_t> AffineExprSimplifier::GetConstantRhs(
   return bound.lower;
 }
 
-AffineExpr AffineExprSimplifier::RewriteSum(
-    AffineExpr expr, const std::function<AffineExpr(AffineExpr)>& map) {
-  if (expr.getKind() == AffineExprKind::Add) {
-    auto add = mlir::dyn_cast<AffineBinaryOpExpr>(expr);
-    return RewriteSum(add.getLHS(), map) + RewriteSum(add.getRHS(), map);
-  }
-  return map(expr);
-}
-
-AffineExpr AffineExprSimplifier::RewriteSumIf(
+AffineExpr AffineExprSimplifier::RemoveSummands(
     AffineExpr expr, const std::function<bool(AffineExpr)>& pred) {
   if (expr.getKind() == AffineExprKind::Add) {
     auto add = mlir::dyn_cast<AffineBinaryOpExpr>(expr);
-    auto lhs = RewriteSumIf(add.getLHS(), pred);
-    auto rhs = RewriteSumIf(add.getRHS(), pred);
+    auto lhs = RemoveSummands(add.getLHS(), pred);
+    auto rhs = RemoveSummands(add.getRHS(), pred);
     if (lhs == add.getLHS() && rhs == add.getRHS()) {
       return add;
     }
     return lhs + rhs;
   }
-  return pred(expr) ? expr : mlir::getAffineConstantExpr(0, expr.getContext());
+  return pred(expr) ? mlir::getAffineConstantExpr(0, expr.getContext()) : expr;
+}
+
+void AffineExprSimplifier::VisitSummands(
+    mlir::AffineExpr expr, const std::function<void(mlir::AffineExpr)>& visit) {
+  if (expr.getKind() == AffineExprKind::Add) {
+    auto add = mlir::dyn_cast<AffineBinaryOpExpr>(expr);
+    VisitSummands(add.getLHS(), visit);
+    VisitSummands(add.getRHS(), visit);
+  } else {
+    visit(expr);
+  }
+}
+
+// Compares the two expression by their AST. The ordering is arbitrary but
+// similar to what MLIR's simplifier does.
+int CompareExprs(AffineExpr a, AffineExpr b) {
+  if ((b.getKind() == AffineExprKind::Constant) !=
+      (a.getKind() == AffineExprKind::Constant)) {
+    return a.getKind() == AffineExprKind::Constant ? 1 : -1;
+  }
+  if (a.getKind() < b.getKind()) {
+    return -1;
+  }
+  if (a.getKind() > b.getKind()) {
+    return 1;
+  }
+  assert(a.getKind() == b.getKind());
+  int64_t a_value = 0;
+  int64_t b_value = 0;
+  switch (a.getKind()) {
+    case AffineExprKind::Add:
+    case AffineExprKind::FloorDiv:
+    case AffineExprKind::CeilDiv:
+    case AffineExprKind::Mul:
+    case AffineExprKind::Mod: {
+      auto a_bin = mlir::cast<AffineBinaryOpExpr>(a);
+      auto b_bin = mlir::cast<AffineBinaryOpExpr>(b);
+      auto lhs = CompareExprs(a_bin.getLHS(), b_bin.getLHS());
+      if (lhs != 0) {
+        return lhs;
+      }
+      return CompareExprs(a_bin.getRHS(), b_bin.getRHS());
+    }
+    case AffineExprKind::Constant: {
+      a_value = mlir::cast<AffineConstantExpr>(a).getValue();
+      b_value = mlir::cast<AffineConstantExpr>(b).getValue();
+      break;
+    }
+    case AffineExprKind::SymbolId: {
+      a_value = mlir::cast<AffineSymbolExpr>(a).getPosition();
+      b_value = mlir::cast<AffineSymbolExpr>(b).getPosition();
+      break;
+    }
+    case AffineExprKind::DimId: {
+      a_value = mlir::cast<AffineDimExpr>(a).getPosition();
+      b_value = mlir::cast<AffineDimExpr>(b).getPosition();
+      break;
+    }
+  }
+  return a_value < b_value ? -1 : (a_value > b_value ? 1 : 0);
+}
+
+AffineExpr CanonicalizeOrder(AffineExpr in) {
+  if (auto binop = mlir::dyn_cast<AffineBinaryOpExpr>(in)) {
+    auto lhs = CanonicalizeOrder(binop.getLHS());
+    auto rhs = CanonicalizeOrder(binop.getRHS());
+    if ((binop.getKind() == AffineExprKind::Add ||
+         binop.getKind() == AffineExprKind::Mul) &&
+        CompareExprs(lhs, rhs) > 0) {
+      std::swap(lhs, rhs);
+    }
+    return getAffineBinaryOpExpr(binop.getKind(), lhs, rhs);
+  }
+  return in;
 }
 
 AffineExpr AffineExprSimplifier::SimplifyOnce(AffineExpr expr) {
@@ -477,7 +549,11 @@ AffineMap AffineExprSimplifier::Simplify(AffineMap affine_map) {
     results.push_back(simplified);
   }
   if (nothing_changed) {
-    return affine_map;
+    for (auto& result : results) {
+      result = CanonicalizeOrder(result);
+    }
+    return AffineMap::get(affine_map.getNumDims(), affine_map.getNumSymbols(),
+                          results, affine_map.getContext());
   }
   return Simplify(AffineMap::get(affine_map.getNumDims(),
                                  affine_map.getNumSymbols(), results,
@@ -685,6 +761,11 @@ IndexingMap IndexingMap::FromTensorSizes(
                      /*rt_vars=*/{}};
 }
 
+RangeEvaluator IndexingMap::GetRangeEvaluator() const {
+  return RangeEvaluator(GetDimensionBounds(), GetSymbolBounds(),
+                        GetMLIRContext());
+}
+
 const Interval& IndexingMap::GetDimensionBound(int64_t dim_id) const {
   return dim_vars_[dim_id].bounds;
 }
@@ -884,6 +965,21 @@ std::string IndexingMap::ToString(const AffineMapPrinter& printer) const {
   return ss.str();
 }
 
+void PrintRTVars(const std::vector<RTVar>& rt_vars,
+                 int first_rt_var_symbol_index, std::ostream& out,
+                 const AffineMapPrinter& printer) {
+  for (const auto& [index, rt_var] : llvm::enumerate(rt_vars)) {
+    out << printer.GetSymbolName(
+               static_cast<int64_t>(first_rt_var_symbol_index + index))
+        << " in ";
+    rt_var.feasible_values.Print(out);
+    out << "\n  hlo: "
+        << (rt_var.hlo == nullptr ? "NULL" : rt_var.hlo->ToString()) << "\n  ";
+    printer.Print(out, rt_var.map);
+    out << '\n';
+  }
+}
+
 void IndexingMap::Print(std::ostream& out,
                         const AffineMapPrinter& printer) const {
   printer.Print(out, affine_map_);
@@ -899,15 +995,8 @@ void IndexingMap::Print(std::ostream& out,
     out << '\n';
   }
   int64_t range_vars_count = GetRangeVarsCount();
-  for (const auto& [index, rt_var] : llvm::enumerate(rt_vars_)) {
-    out << printer.GetSymbolName(static_cast<int64_t>(range_vars_count + index))
-        << " in ";
-    rt_var.feasible_values.Print(out);
-    out << "\n  hlo: "
-        << (rt_var.hlo == nullptr ? "NULL" : rt_var.hlo->ToString()) << "\n  ";
-    printer.Print(out, rt_var.map);
-    out << '\n';
-  }
+  PrintRTVars(rt_vars_, /*first_rt_var_symbol_index=*/range_vars_count, out,
+              printer);
   std::vector<std::string> expr_range_strings;
   expr_range_strings.reserve(constraints_.size());
   for (const auto& [expr, range] : constraints_) {
@@ -1079,75 +1168,128 @@ bool IsFunctionOfUnusedDimsAndSymbolsOnly(
   return true;
 }
 
-}  // namespace
+struct UnusedVariables {
+  SmallBitVector unused_dims;
+  SmallBitVector unused_symbols;
+  SmallVector<AffineExpr> constraints_with_unused_vars_only;
+};
 
-void IndexingMap::RemoveUnusedSymbols() {
-  if (IsUndefined()) return;
+// Detects unused dimensions and symbols in the inde
+UnusedVariables DetectUnusedVariables(const IndexingMap& indexing_map) {
+  AffineMap affine_map = indexing_map.GetAffineMap();
 
-  // Remove unused symbols from the affine_map.
-  unsigned num_symbols_before = affine_map_.getNumSymbols();
-  SmallBitVector unused_symbols_bit_vector =
-      mlir::getUnusedSymbolsBitVector({affine_map_});
-  SmallBitVector unused_dims_bit_vector =
-      mlir::getUnusedDimsBitVector({affine_map_});
+  UnusedVariables unused_vars;
+  // Find unused dimensions and symbols in the affine_map.
+  unused_vars.unused_dims = mlir::getUnusedDimsBitVector({affine_map});
+  unused_vars.unused_symbols = mlir::getUnusedSymbolsBitVector({affine_map});
 
   // Check if the symbols that are unused in `affine_map` are also unused in
   // expressions.
-  std::vector<std::pair<AffineExpr, UsedParameters>> candidates_to_remove;
-  for (const auto& [expr, range] : constraints_) {
+  SmallVector<std::pair<AffineExpr, UsedParameters>, 2>
+      unused_constraints_candidates;
+  for (const auto& [expr, range] : indexing_map.GetConstraints()) {
     UsedParameters used_parameters = GetUsedParameters(expr);
     // If the expression uses only symbols and dims that are "unused" in
     // `affine_map`, then we can remove it.
     if (IsFunctionOfUnusedDimsAndSymbolsOnly(used_parameters,
-                                             unused_dims_bit_vector,
-                                             unused_symbols_bit_vector)) {
-      candidates_to_remove.push_back({expr, used_parameters});
+                                             unused_vars.unused_dims,
+                                             unused_vars.unused_symbols)) {
+      unused_constraints_candidates.push_back({expr, used_parameters});
       continue;
     }
-    // Otherwise, we need to mark all symbols of these expr as "used".
+    // Otherwise, we need to mark all dims and symbols of these expr as "used".
+    for (int64_t dim_id : used_parameters.dimension_ids) {
+      unused_vars.unused_dims[dim_id] = false;
+    }
     for (int64_t symbol_id : used_parameters.symbol_ids) {
-      unused_symbols_bit_vector[symbol_id] = false;
+      unused_vars.unused_symbols[symbol_id] = false;
     }
   }
-  for (const auto& [expr, used_parameters] : candidates_to_remove) {
+  for (const auto& [expr, used_parameters] : unused_constraints_candidates) {
     if (IsFunctionOfUnusedDimsAndSymbolsOnly(used_parameters,
-                                             unused_dims_bit_vector,
-                                             unused_symbols_bit_vector)) {
-      constraints_.erase(expr);
+                                             unused_vars.unused_dims,
+                                             unused_vars.unused_symbols)) {
+      unused_vars.constraints_with_unused_vars_only.push_back(expr);
     }
   }
+  return unused_vars;
+}
 
-  // Compress `affine_map` using the updated `unused_symbols_bit_vector`.
-  affine_map_ = mlir::compressSymbols(affine_map_, unused_symbols_bit_vector);
+SmallBitVector ConcatenateBitVectors(const SmallBitVector& lhs,
+                                     const SmallBitVector& rhs) {
+  SmallBitVector concat(lhs.size() + rhs.size(), false);
+  int id = 0;
+  for (int i = 0; i < lhs.size(); ++i, ++id) {
+    concat[id] = lhs[i];
+  }
+  for (int i = 0; i < rhs.size(); ++i, ++id) {
+    concat[id] = rhs[i];
+  }
+  return concat;
+}
 
-  // Remap symbols in the constraint expressions accordingly.
-  unsigned num_symbols_after = affine_map_.getNumSymbols();
-  if (num_symbols_after == num_symbols_before) return;
+}  // namespace
 
-  std::vector<RangeVar> compressed_range_vars;
-  std::vector<RTVar> compressed_rt_vars;
+bool IndexingMap::CompressVars(const llvm::SmallBitVector& unused_dims,
+                               const llvm::SmallBitVector& unused_symbols) {
   MLIRContext* mlir_context = GetMLIRContext();
-  int64_t used_symbols_count = 0;
-  std::vector<AffineExpr> symbol_replacements(
-      num_symbols_before, getAffineConstantExpr(0, mlir_context));
-  auto range_vars_count = range_vars_.size();
-  for (int i = 0; i < unused_symbols_bit_vector.size(); ++i) {
-    if (!unused_symbols_bit_vector[i]) {
-      if (i < range_vars_count) {
-        compressed_range_vars.push_back(range_vars_[i]);
-      } else {
-        compressed_rt_vars.push_back(rt_vars_[i - range_vars_count]);
+
+  bool num_dims_changed = unused_dims.count() > 0;
+  bool num_symbols_changed = unused_symbols.count() > 0;
+  if (!num_dims_changed && !num_symbols_changed) return false;
+
+  unsigned num_dims_before = GetDimensionCount();
+  unsigned num_symbols_before = GetSymbolCount();
+
+  // Compress DimVars.
+  SmallVector<AffineExpr, 2> dim_replacements;
+  if (num_dims_changed) {
+    affine_map_ = mlir::compressDims(affine_map_, unused_dims);
+    std::vector<DimVar> compressed_dim_vars;
+    dim_replacements = SmallVector<AffineExpr, 2>(
+        num_dims_before, getAffineConstantExpr(0, mlir_context));
+    int64_t used_dims_count = 0;
+    for (int i = 0; i < unused_dims.size(); ++i) {
+      if (!unused_dims[i]) {
+        compressed_dim_vars.push_back(dim_vars_[i]);
+        dim_replacements[i] = getAffineDimExpr(used_dims_count++, mlir_context);
       }
-      symbol_replacements[i] =
-          getAffineSymbolExpr(used_symbols_count++, mlir_context);
     }
+    dim_vars_ = std::move(compressed_dim_vars);
   }
-  range_vars_ = std::move(compressed_range_vars);
-  rt_vars_ = std::move(compressed_rt_vars);
+
+  // Compress RangeVars and RTVars.
+  SmallVector<AffineExpr, 2> symbol_replacements;
+  if (num_symbols_changed) {
+    affine_map_ = mlir::compressSymbols(affine_map_, unused_symbols);
+    symbol_replacements = SmallVector<AffineExpr, 2>(
+        num_symbols_before, getAffineConstantExpr(0, mlir_context));
+    std::vector<RangeVar> compressed_range_vars;
+    std::vector<RTVar> compressed_rt_vars;
+    MLIRContext* mlir_context = GetMLIRContext();
+    int64_t used_symbols_count = 0;
+    auto range_vars_count = range_vars_.size();
+    for (int i = 0; i < unused_symbols.size(); ++i) {
+      if (!unused_symbols[i]) {
+        if (i < range_vars_count) {
+          compressed_range_vars.push_back(range_vars_[i]);
+        } else {
+          compressed_rt_vars.push_back(rt_vars_[i - range_vars_count]);
+        }
+        symbol_replacements[i] =
+            getAffineSymbolExpr(used_symbols_count++, mlir_context);
+      }
+    }
+    range_vars_ = std::move(compressed_range_vars);
+    rt_vars_ = std::move(compressed_rt_vars);
+  }
+
+  // Remove constraints.
   std::vector<AffineExpr> to_remove;
   std::vector<std::pair<AffineExpr, Interval>> to_add;
   for (const auto& [expr, range] : constraints_) {
-    auto updated_expr = expr.replaceSymbols(symbol_replacements);
+    auto updated_expr =
+        expr.replaceDimsAndSymbols(dim_replacements, symbol_replacements);
     if (updated_expr == expr) continue;
     to_add.push_back({updated_expr, range});
     to_remove.push_back(expr);
@@ -1158,6 +1300,47 @@ void IndexingMap::RemoveUnusedSymbols() {
   for (const auto& [expr, range] : to_add) {
     AddConstraint(expr, range);
   }
+  return true;
+}
+
+SmallBitVector IndexingMap::RemoveUnusedSymbols() {
+  if (IsUndefined()) return {};
+
+  UnusedVariables unused_vars = DetectUnusedVariables(*this);
+  for (AffineExpr expr : unused_vars.constraints_with_unused_vars_only) {
+    constraints_.erase(expr);
+  }
+  if (!CompressVars(/*unused_dims=*/{}, unused_vars.unused_symbols)) {
+    return {};
+  }
+  return std::move(unused_vars.unused_symbols);
+}
+
+SmallBitVector IndexingMap::RemoveUnusedDimensions() {
+  if (IsUndefined()) return {};
+
+  UnusedVariables unused_vars = DetectUnusedVariables(*this);
+  for (AffineExpr expr : unused_vars.constraints_with_unused_vars_only) {
+    constraints_.erase(expr);
+  }
+  if (!CompressVars(unused_vars.unused_dims, /*unused_symbols=*/{})) {
+    return {};
+  }
+  return std::move(unused_vars.unused_dims);
+}
+
+SmallBitVector IndexingMap::RemoveUnusedVars() {
+  if (IsUndefined()) return {};
+
+  UnusedVariables unused_vars = DetectUnusedVariables(*this);
+  for (AffineExpr expr : unused_vars.constraints_with_unused_vars_only) {
+    constraints_.erase(expr);
+  }
+  if (!CompressVars(unused_vars.unused_dims, unused_vars.unused_symbols)) {
+    return {};
+  }
+  return ConcatenateBitVectors(unused_vars.unused_dims,
+                               unused_vars.unused_symbols);
 }
 
 void IndexingMap::MergeModConstraints() {
@@ -1531,6 +1714,18 @@ bool IndexingMap::ReplaceConstantRTVars(
   }
 
   return !to_delete.empty();
+}
+
+bool IndexingMap::IsRangeVarSymbol(mlir::AffineSymbolExpr symbol) const {
+  unsigned int position = symbol.getPosition();
+  CHECK_LE(position, GetSymbolCount());
+  return position < range_vars_.size();
+}
+
+bool IndexingMap::IsRTVarSymbol(mlir::AffineSymbolExpr symbol) const {
+  unsigned int position = symbol.getPosition();
+  CHECK_LE(position, GetSymbolCount());
+  return position >= range_vars_.size();
 }
 
 }  // namespace gpu

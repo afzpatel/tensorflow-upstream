@@ -67,10 +67,10 @@ limitations under the License.
 #include "xla/python/traceback.h"
 #include "xla/python/types.h"
 #include "xla/status_macros.h"
+#include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/python/lib/core/numpy.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/concurrency/ref_count.h"
 #include "tsl/platform/logging.h"
 #include "tsl/platform/statusor.h"
 #include "tsl/profiler/lib/traceme.h"
@@ -125,8 +125,8 @@ struct ShardArgResult {
 // `arg`: The object to shard across `devices`. If a `Array`,
 //   a fast-path will be executed if it's already correctly sharded.
 //
-// Returns a failure Status when an unrecoverable error occurred, so we don't
-// need to fallback to Python.
+// Returns a failure absl::Status when an unrecoverable error occurred, so we
+// don't need to fallback to Python.
 //
 // Both `devices` and `sharding_spec` has the same length.
 absl::StatusOr<ShardArgResult> ShardArg(

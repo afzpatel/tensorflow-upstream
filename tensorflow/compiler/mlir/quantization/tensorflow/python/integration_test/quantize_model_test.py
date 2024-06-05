@@ -346,25 +346,10 @@ class QuantizationOptionsTest(quantize_model_test_base.QuantizedModelTest):
           self._input_saved_model_path, quantization_options=options
       )
 
-  @test_util.run_in_graph_and_eager_modes
   def test_force_graph_mode_calibration(self):
-    input_type = dtypes.int32
-    input_placeholder = self._create_and_save_tf1_gather_model(
-        self._input_saved_model_path,
-        signature_key=signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY,
-        tags={tag_constants.SERVING},
-        input_key='x',
-        output_key='output',
-        input_type=input_type,
-    )
+    model = self.SimpleModel()
 
-    data_gen = self._create_data_generator(
-        input_key='x',
-        shape=input_placeholder.shape,
-        minval=0,
-        maxval=10,
-        dtype=input_type,
-    )
+    saved_model_save.save(model, self._input_saved_model_path)
 
     options = quant_opts_pb2.QuantizationOptions(
         quantization_method=quant_opts_pb2.QuantizationMethod(
@@ -383,7 +368,7 @@ class QuantizationOptionsTest(quantize_model_test_base.QuantizedModelTest):
         quantize_model.quantize(
             self._input_saved_model_path,
             quantization_options=options,
-            representative_dataset=data_gen,
+            representative_dataset=self._simple_model_data_gen(),
         )
       finally:
         # Restore the logger verbosity.
@@ -2724,6 +2709,116 @@ class StaticRangeQuantizationTest(quantize_model_test_base.QuantizedModelTest):
     # The difference between TF and target path is expected to be small.
     self.assertAllClose(new_outputs, got_outputs, atol=0.097)
     self.assertAllClose(new_outputs, expected_outputs, atol=0.057)
+
+  def test_reuse_calibration_data(self):
+    model = self._create_simple_gather_and_conv_model(
+        dtypes.int32, filter_shape=(2, 3, 3, 1024)
+    )
+    saved_model_save.save(model, self._input_saved_model_path)
+
+    data_gen = self._create_data_generator(
+        input_key='input_tensor',
+        shape=[50],
+        minval=0,
+        maxval=64,
+        dtype=dtypes.int32,
+    )
+
+    tags = {tag_constants.SERVING}
+
+    calibration_data_dir = self.create_tempdir('calibration_data').full_path
+    quantization_options = quant_opts_pb2.QuantizationOptions(
+        quantization_method=quant_opts_pb2.QuantizationMethod(
+            preset_method=_PresetMethod.METHOD_STATIC_RANGE_INT8
+        ),
+        tags=tags,
+        signature_keys=['serving_default'],
+        op_set=quant_opts_pb2.XLA,
+        force_graph_mode_calibration=True,
+        calibration_options=stablehlo_quant_config_pb2.CalibrationOptions(
+            calibration_method=_CalibrationMethod.CALIBRATION_METHOD_MIN_MAX,
+            calibration_data_dir=calibration_data_dir,
+        ),
+    )
+
+    # Run quantization the first time, calibration is expected to be run.
+    with self.assertLogs(level='INFO') as info_logs:
+      # Save the logger verbosity.
+      prev_log_level = logging.get_verbosity()
+      logging.set_verbosity(logging.INFO)
+      try:
+        converted_model1 = quantize_model.quantize(
+            self._input_saved_model_path,
+            self._output_saved_model_path,
+            quantization_options,
+            representative_dataset=data_gen,
+        )
+      finally:
+        # Restore the logger verbosity.
+        logging.set_verbosity(prev_log_level)
+
+      self.assertNotEmpty(info_logs.records)
+      self.assertTrue(
+          self._any_log_contains(
+              'Calibration step is executed in graph mode.',
+              info_logs.records,
+          )
+      )
+      self.assertIsNotNone(converted_model1)
+      self.assertCountEqual(
+          converted_model1.signatures._signatures.keys(), {'serving_default'}
+      )
+
+      output_loader = saved_model_loader.SavedModelLoader(
+          self._output_saved_model_path
+      )
+      output_graphdef = output_loader.get_meta_graph_def_from_tags(
+          tags
+      ).graph_def
+      self.assertTrue(self._contains_op(output_graphdef, 'XlaConvV2'))
+
+    # Run quantization the first time, calibration is expected to be skipped.
+    with self.assertLogs(level='INFO') as info_logs:
+      # Save the logger verbosity.
+      prev_log_level = logging.get_verbosity()
+      logging.set_verbosity(logging.INFO)
+      try:
+        converted_model2 = quantize_model.quantize(
+            self._input_saved_model_path,
+            self._output_saved_model_path,
+            quantization_options,
+            representative_dataset=data_gen,
+            overwrite_output_directory=True,
+        )
+      finally:
+        # Restore the logger verbosity.
+        logging.set_verbosity(prev_log_level)
+
+      self.assertNotEmpty(info_logs.records)
+      self.assertFalse(
+          self._any_log_contains(
+              'Calibration step is executed in graph mode.',
+              info_logs.records,
+          )
+      )
+      self.assertIsNotNone(converted_model2)
+      self.assertCountEqual(
+          converted_model2.signatures._signatures.keys(), {'serving_default'}
+      )
+
+      # Expect two models to produce the same results.
+      test_data = ops.convert_to_tensor(
+          np.random.uniform(low=0, high=64, size=(32)).astype(
+              dtypes.int32.as_numpy_dtype
+          )
+      )
+      new_outputs_1 = converted_model1.signatures['serving_default'](
+          input_tensor=test_data
+      )['output']
+      new_outputs_2 = converted_model2.signatures['serving_default'](
+          input_tensor=test_data
+      )['output']
+      self.assertAllClose(new_outputs_1, new_outputs_2)
 
   @test_util.run_in_graph_and_eager_modes
   def test_function_alias_preserved(self):
@@ -5406,6 +5501,7 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
 
   @parameterized.named_parameters(
       ('to_xla_per_tensor', quant_opts_pb2.XLA, False),
+      ('stablehlo_per_channel', quant_opts_pb2.STABLEHLO, True),
   )
   @test_util.run_in_graph_and_eager_modes
   def test_matmul_model(
@@ -5447,8 +5543,14 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
     )
     output_graphdef = output_loader.get_meta_graph_def_from_tags(tags).graph_def
 
+    if target_opset == quant_opts_pb2.XLA:
+      self.assertTrue(self._contains_op(output_graphdef, 'XlaDotV2'))
+    elif target_opset == quant_opts_pb2.STABLEHLO:
+      # This is to verify the invocation of StableHLO quantizer works. More
+      # thorough functional tests are in StableHLO quantizer directory.
+      self.assertTrue(self._contains_op(output_graphdef, 'XlaCallModule'))
+
     # Due to other meta data, the compression is not exactly 1/4.
-    self.assertTrue(self._contains_op(output_graphdef, 'XlaDotV2'))
     self.assertLess(
         testing.get_size_ratio(
             self._output_saved_model_path, self._input_saved_model_path
@@ -5458,6 +5560,7 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
 
   @parameterized.named_parameters(
       ('to_xla_per_tensor', quant_opts_pb2.XLA, False),
+      ('stablehlo_per_channel', quant_opts_pb2.STABLEHLO, True),
       # TODO: b/289761265 - [Converter Component][TF-Quantizer] Improve Weight-
       # only Quantization
       # Enable this back once new weight-only quantizer is supported for per-
@@ -5517,7 +5620,7 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
         0.3,
     )
 
-    if enable_per_channel_quantization:
+    if enable_per_channel_quantization and target_opset == quant_opts_pb2.XLA:
       per_channel_size_attr = attr_value_pb2.AttrValue(
           list=attr_value_pb2.AttrValue.ListValue(
               shape=[
@@ -5536,6 +5639,12 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
               output_graphdef, 'Const', '_output_shapes', per_channel_size_attr
           )
       )
+    if target_opset == quant_opts_pb2.XLA:
+      self.assertTrue(self._contains_op(output_graphdef, 'XlaConvV2'))
+    elif target_opset == quant_opts_pb2.STABLEHLO:
+      # This is to verify the invocation of StableHLO quantizer works. More
+      # thorough functional tests are in StableHLO quantizer directory.
+      self.assertTrue(self._contains_op(output_graphdef, 'XlaCallModule'))
 
     input_tensor = array_ops.constant(
         np.random.uniform(low=0, high=0.1, size=input_shape),
@@ -6211,25 +6320,25 @@ class CalibrationOptionsTest(quantize_model_test_base.QuantizedModelTest):
               stablehlo_quant_config_pb2.CalibrationOptions(
                   calibration_method=_CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_PERCENTILE,
                   calibration_parameters=stablehlo_quant_config_pb2.CalibrationOptions.CalibrationParameters(
-                      initial_num_bins=32,
+                      num_bins=32,
                   ),
               ),
               stablehlo_quant_config_pb2.CalibrationOptions(
                   calibration_method=_CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_MSE_BRUTEFORCE,
                   calibration_parameters=stablehlo_quant_config_pb2.CalibrationOptions.CalibrationParameters(
-                      initial_num_bins=32,
+                      num_bins=32,
                   ),
               ),
               stablehlo_quant_config_pb2.CalibrationOptions(
                   calibration_method=_CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_MSE_MAX_FREQUENCY,
                   calibration_parameters=stablehlo_quant_config_pb2.CalibrationOptions.CalibrationParameters(
-                      initial_num_bins=32,
+                      num_bins=32,
                   ),
               ),
               stablehlo_quant_config_pb2.CalibrationOptions(
                   calibration_method=_CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_MSE_SYMMETRIC,
                   calibration_parameters=stablehlo_quant_config_pb2.CalibrationOptions.CalibrationParameters(
-                      initial_num_bins=32,
+                      num_bins=32,
                   ),
               ),
           ],
@@ -6376,7 +6485,7 @@ class CalibrationOptionsTest(quantize_model_test_base.QuantizedModelTest):
           'default_calibration_options': stablehlo_quant_config_pb2.CalibrationOptions(
               calibration_method=_CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_PERCENTILE,
               calibration_parameters=stablehlo_quant_config_pb2.CalibrationOptions.CalibrationParameters(
-                  initial_num_bins=256,
+                  num_bins=512,
                   min_percentile=0.001,
                   max_percentile=99.999,
               ),
@@ -6390,7 +6499,7 @@ class CalibrationOptionsTest(quantize_model_test_base.QuantizedModelTest):
           'default_calibration_options': stablehlo_quant_config_pb2.CalibrationOptions(
               calibration_method=_CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_MSE_BRUTEFORCE,
               calibration_parameters=stablehlo_quant_config_pb2.CalibrationOptions.CalibrationParameters(
-                  initial_num_bins=256
+                  num_bins=512
               ),
           ),
       },
@@ -6402,7 +6511,7 @@ class CalibrationOptionsTest(quantize_model_test_base.QuantizedModelTest):
           'default_calibration_options': stablehlo_quant_config_pb2.CalibrationOptions(
               calibration_method=_CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_MSE_MAX_FREQUENCY,
               calibration_parameters=stablehlo_quant_config_pb2.CalibrationOptions.CalibrationParameters(
-                  initial_num_bins=256
+                  num_bins=512
               ),
           ),
       },
@@ -6414,7 +6523,7 @@ class CalibrationOptionsTest(quantize_model_test_base.QuantizedModelTest):
           'default_calibration_options': stablehlo_quant_config_pb2.CalibrationOptions(
               calibration_method=_CalibrationMethod.CALIBRATION_METHOD_HISTOGRAM_MSE_SYMMETRIC,
               calibration_parameters=stablehlo_quant_config_pb2.CalibrationOptions.CalibrationParameters(
-                  initial_num_bins=256
+                  num_bins=512
               ),
           ),
       },
@@ -6441,8 +6550,8 @@ class CalibrationOptionsTest(quantize_model_test_base.QuantizedModelTest):
         default_calibration_options.calibration_method,
     )
     self.assertEqual(
-        quant_opts.calibration_options.calibration_parameters.initial_num_bins,
-        default_calibration_options.calibration_parameters.initial_num_bins,
+        quant_opts.calibration_options.calibration_parameters.num_bins,
+        default_calibration_options.calibration_parameters.num_bins,
     )
     self.assertEqual(
         quant_opts.calibration_options.calibration_parameters.min_percentile,

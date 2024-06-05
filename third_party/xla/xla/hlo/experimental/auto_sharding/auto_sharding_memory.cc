@@ -39,73 +39,140 @@ using LiveIdx = int64_t;  // Indexes into the liveness range (like a time point)
 using GroupIdx = int64_t;  // Indexes into the list of groups
 
 using PrimPair = std::pair<PrimIdx, PrimIdx>;
-using LiveAndPrim = std::pair<LiveIdx, PrimIdx>;
+using Interval = std::pair<LiveIdx, LiveIdx>;
+using ActivePrim = std::pair<Interval, PrimIdx>;
 
-struct Interval {
-  LiveIdx lower = std::numeric_limits<LiveIdx>::max();
-  LiveIdx upper = 0;
+bool IsValid(const Interval& interval) {
+  return interval.first <= interval.second;
+}
 
-  bool IsValid() const { return lower <= upper; }
-  int64_t length() const { return upper - lower + 1; }  // (closed interval)
-};
+int64_t length(const Interval& interval) {
+  return interval.second - interval.first + 1;  // (closed interval)
+}
 
 }  // namespace
 
-int64_t MemoryTermReducer::Reduce(
+std::pair<int64_t, int64_t> MemoryTermReducer::Reduce(
     int64_t num_lives, int64_t num_primitives,
-    std::function<tsl::protobuf::RepeatedField<int64_t>(int64_t)>  // NOLINT
-        live) {
+    const std::function<
+        tsl::protobuf::RepeatedField<int64_t>(int64_t)>&  // NOLINT
+        live,
+    int64_t max_iterations) {
   LOG(INFO) << "Memory Term Reducer beginning to reduce number of terms ...";
 
   // Clear internal state.
   reduced_live_.clear();
+  reduced_intervals_.clear();
   reduced_groups_.clear();
 
   // For each primitive, determine the live interval it spans.
   int64_t num_terms = 0;
-  std::vector<Interval> intervals(num_primitives);
+  reduced_intervals_.reserve(num_primitives);
+  for (PrimIdx prim_idx = 0; prim_idx < num_primitives; ++prim_idx) {
+    reduced_intervals_.push_back({std::numeric_limits<LiveIdx>::max(), 0});
+  }
   for (LiveIdx live_idx = 0; live_idx < num_lives; ++live_idx) {
     for (const PrimIdx prim_idx : live(live_idx)) {
-      intervals[prim_idx].lower = std::min(intervals[prim_idx].lower, live_idx);
-      intervals[prim_idx].upper = std::max(intervals[prim_idx].upper, live_idx);
+      Interval& interval = reduced_intervals_[prim_idx];
+      interval.first = std::min(interval.first, live_idx);
+      interval.second = std::max(interval.second, live_idx);
       ++num_terms;
     }
   }
 
+  Reduce(num_lives, num_primitives, max_iterations);
+
+  // Create the reduced live matrix.
+  int64_t num_reduced_terms = 0;
+  reduced_live_.resize(num_lives);
+  for (PrimIdx prim_idx = 0; prim_idx < reduced_intervals_.size(); ++prim_idx) {
+    const Interval& interval = reduced_intervals_[prim_idx];
+    for (LiveIdx live_idx = interval.first; live_idx <= interval.second;
+         ++live_idx) {
+      reduced_live_[live_idx].push_back(prim_idx);
+      ++num_reduced_terms;
+    }
+  }
+
+  // Add in any additional terms that will be needed to define groups.
+  for (const auto& group : reduced_groups_) num_reduced_terms += group.size();
+
+  LOG(INFO) << "Memory Term Reducer finished reducing the number of terms.";
+  return {num_terms, num_reduced_terms};
+}
+
+std::pair<int64_t, int64_t> MemoryTermReducer::Reduce(
+    int64_t num_lives, int64_t num_primitives,
+    const std::function<std::pair<int64_t, int64_t>(int64_t)>& intervals,
+    int64_t max_iterations) {
+  LOG(INFO) << "Memory Term Reducer beginning to reduce number of terms ...";
+
+  // Clear internal state.
+  reduced_live_.clear();
+  reduced_intervals_.clear();
+  reduced_groups_.clear();
+
+  // For each primitive, record the live interval it spans.
+  int64_t num_terms = 0;
+  reduced_intervals_.reserve(num_primitives);
+  for (PrimIdx prim_idx = 0; prim_idx < num_primitives; ++prim_idx) {
+    reduced_intervals_.push_back(intervals(prim_idx));
+    const Interval& interval = reduced_intervals_.back();
+    if (IsValid(interval)) num_terms += length(interval);
+  }
+
+  Reduce(num_lives, num_primitives, max_iterations);
+
+  // Calculate the number of reduced terms.
+  int64_t num_reduced_terms = 0;
+  for (PrimIdx prim_idx = 0; prim_idx < reduced_intervals_.size(); ++prim_idx) {
+    const Interval& interval = reduced_intervals_[prim_idx];
+    if (IsValid(interval)) num_reduced_terms += length(interval);
+  }
+
+  // Add in any additional terms that will be needed to define groups.
+  for (const auto& group : reduced_groups_) num_reduced_terms += group.size();
+
+  LOG(INFO) << "Memory Term Reducer finished reducing the number of terms.";
+  return {num_terms, num_reduced_terms};
+}
+
+void MemoryTermReducer::Reduce(int64_t num_lives, int64_t num_primitives,
+                               int64_t max_iterations) {
   // For each live index, track the primitives entering memory or being evicted.
   std::vector<absl::btree_set<PrimIdx>> enter(num_lives), evict(num_lives);
   for (PrimIdx prim_idx = 0; prim_idx < num_primitives; ++prim_idx) {
-    if (!intervals[prim_idx].IsValid()) continue;  // Not found in live matrix.
-    enter[intervals[prim_idx].lower].insert(prim_idx);
-    evict[intervals[prim_idx].upper].insert(prim_idx);
+    const Interval& interval = reduced_intervals_[prim_idx];
+    if (!IsValid(interval)) continue;  // Not found in live matrix.
+    enter[interval.first].insert(prim_idx);
+    evict[interval.second].insert(prim_idx);
   }
 
   // A function to determine if one primitive would 'split' another.
-  auto Splits = [&intervals](PrimIdx large_idx, PrimIdx small_idx) -> bool {
-    return intervals[large_idx].lower < intervals[small_idx].lower &&
-           intervals[large_idx].upper > intervals[small_idx].upper;
+  auto Splits = [this](PrimIdx large_idx, PrimIdx small_idx) -> bool {
+    const Interval& large = reduced_intervals_[large_idx];
+    const Interval& small = reduced_intervals_[small_idx];
+    return large.first < small.first && large.second > small.second;
   };
 
   // A function to calculate the overlap between any pair.
-  auto CalcOverlap = [&intervals, Splits](
+  auto CalcOverlap = [this, Splits](
                          int64_t prim0_idx,
                          int64_t prim1_idx) -> std::optional<Interval> {
-    if (!intervals[prim0_idx].IsValid() || !intervals[prim1_idx].IsValid()) {
-      return std::nullopt;  // Happens when prim is absent in matrix or vanishes
-    }
-    if (Splits(prim0_idx, prim1_idx) || Splits(prim1_idx, prim0_idx)) {
-      return std::nullopt;  // Merging these would split one of the primitives.
-    }
-    const Interval overlap = {
-        std::max(intervals[prim0_idx].lower, intervals[prim1_idx].lower),
-        std::min(intervals[prim0_idx].upper, intervals[prim1_idx].upper)};
-    return overlap;
+    if (prim0_idx == prim1_idx) return std::nullopt;  // No self-overlap allowed
+    const Interval& interval0 = reduced_intervals_[prim0_idx];
+    const Interval& interval1 = reduced_intervals_[prim1_idx];
+    if (!IsValid(interval0) || !IsValid(interval1)) return std::nullopt;
+    if (Splits(prim0_idx, prim1_idx)) return std::nullopt;
+    if (Splits(prim1_idx, prim0_idx)) return std::nullopt;
+    return Interval(std::max(interval0.first, interval1.first),
+                    std::min(interval0.second, interval1.second));
   };
 
   // A function that merges a primitive (or members of a group) into a group.
   auto MergeIntoGroup = [num_primitives, this](
                             PrimIdx prim_idx,
-                            absl::flat_hash_set<PrimIdx>& reduced_group) {
+                            absl::btree_set<PrimIdx>& reduced_group) {
     if (prim_idx < num_primitives) {
       reduced_group.insert(prim_idx);
     } else {
@@ -115,11 +182,11 @@ int64_t MemoryTermReducer::Reduce(
   };
 
   // A function that calculates the # of terms a primitive (or group) uses.
-  auto CalcNumTerms = [num_primitives, &intervals, this](
+  auto CalcNumTerms = [num_primitives, this](
                           PrimIdx prim_idx,
                           std::optional<Interval> overlap = std::nullopt) {
-    int64_t num_terms = intervals[prim_idx].length();
-    if (overlap) num_terms -= overlap->length();
+    int64_t num_terms = length(reduced_intervals_[prim_idx]);
+    if (overlap) num_terms -= length(*overlap);
     if (prim_idx >= num_primitives && num_terms > 0) {
       num_terms += reduced_groups_[prim_idx - num_primitives].size();
     }
@@ -127,55 +194,55 @@ int64_t MemoryTermReducer::Reduce(
   };
 
   // A function to update a primitive after being merged into a group.
-  auto UpdatePrimitive = [&intervals, &enter, &evict](
+  auto UpdatePrimitive = [this, &enter, &evict](
                              PrimIdx prim_idx,
                              const Interval& overlap) mutable {
-    enter[intervals[prim_idx].lower].erase(prim_idx);
-    evict[intervals[prim_idx].upper].erase(prim_idx);
-    if (intervals[prim_idx].lower == overlap.lower) {
-      intervals[prim_idx].lower = overlap.upper + 1;
-    }
-    if (intervals[prim_idx].upper == overlap.upper) {
-      intervals[prim_idx].upper = overlap.lower - 1;
-    }
-    if (!intervals[prim_idx].IsValid()) return;  // It vanished.
-    enter[intervals[prim_idx].lower].insert(prim_idx);
-    evict[intervals[prim_idx].upper].insert(prim_idx);
+    Interval& interval = reduced_intervals_[prim_idx];
+    enter[interval.first].erase(prim_idx);
+    evict[interval.second].erase(prim_idx);
+    if (auto& t = interval.first; t == overlap.first) t = overlap.second + 1;
+    if (auto& t = interval.second; t == overlap.second) t = overlap.first - 1;
+    if (!IsValid(interval)) return;  // It vanished.
+    enter[interval.first].insert(prim_idx);
+    evict[interval.second].insert(prim_idx);
   };
 
   // A function to sweep through live points & merge large overlaps.
-  auto SweepAndMerge = [&num_lives, &intervals, &enter, &evict, &CalcOverlap,
-                        &CalcNumTerms, &MergeIntoGroup, &UpdatePrimitive,
-                        this]() -> bool {
-    absl::btree_set<LiveAndPrim> actives;  // Active prims sorted by lower value
+  auto SweepAndMerge = [&num_lives, &enter, &evict, &CalcOverlap, &CalcNumTerms,
+                        &MergeIntoGroup, &UpdatePrimitive, this]() -> bool {
+    absl::btree_set<ActivePrim> actives;  // Active prims sorted by interval.
     absl::btree_multimap<int64_t, PrimPair> overlaps;
     for (LiveIdx live_idx = 0; live_idx < num_lives; ++live_idx) {
       for (const PrimIdx prim_idx : enter[live_idx]) {
-        actives.insert({live_idx, prim_idx});
+        actives.insert({reduced_intervals_[prim_idx], prim_idx});
       }
       for (const PrimIdx prim_idx : evict[live_idx]) {
-        actives.erase({intervals[prim_idx].lower, prim_idx});
-        if (actives.empty()) continue;
-        const LiveAndPrim& active = *actives.begin();
-        overlaps.insert({active.first - live_idx, {prim_idx, active.second}});
+        auto active = actives.find({reduced_intervals_[prim_idx], prim_idx});
+        if (++active == actives.end()) continue;  // No prims left to merge with
+        std::optional<Interval> overlap = CalcOverlap(prim_idx, active->second);
+        if (!overlap) continue;
+        overlaps.insert({-length(*overlap), {prim_idx, active->second}});
+      }
+      for (const PrimIdx prim_idx : evict[live_idx]) {
+        actives.erase({reduced_intervals_[prim_idx], prim_idx});
       }
     }
     bool changed = false;
     for (const auto& [_, prim_pair] : overlaps) {
-      PrimIdx prim0_idx = prim_pair.first, prim1_idx = prim_pair.second;
-      std::optional<Interval> overlap = CalcOverlap(prim0_idx, prim1_idx);
+      const PrimIdx prim0_idx = prim_pair.first, prim1_idx = prim_pair.second;
+      const std::optional<Interval> overlap = CalcOverlap(prim0_idx, prim1_idx);
       if (!overlap) continue;
-      absl::flat_hash_set<PrimIdx> reduced_group;
+      absl::btree_set<PrimIdx> reduced_group;
       MergeIntoGroup(prim0_idx, reduced_group);
       MergeIntoGroup(prim1_idx, reduced_group);
       if (CalcNumTerms(prim0_idx) + CalcNumTerms(prim1_idx) <=
           CalcNumTerms(prim0_idx, overlap) + CalcNumTerms(prim1_idx, overlap) +
-              overlap->length() + reduced_group.size()) {
+              length(*overlap) + reduced_group.size()) {
         continue;  // Not reduced.
       }
-      enter[overlap->lower].insert(intervals.size());
-      evict[overlap->upper].insert(intervals.size());
-      intervals.push_back({overlap->lower, overlap->upper});
+      enter[overlap->first].insert(reduced_intervals_.size());
+      evict[overlap->second].insert(reduced_intervals_.size());
+      reduced_intervals_.push_back({overlap->first, overlap->second});
       reduced_groups_.push_back(reduced_group);
       UpdatePrimitive(prim0_idx, *overlap);
       UpdatePrimitive(prim1_idx, *overlap);
@@ -184,35 +251,19 @@ int64_t MemoryTermReducer::Reduce(
     return changed;
   };
 
-  while (SweepAndMerge()) {
+  for (int64_t iteration = 0; iteration < max_iterations; ++iteration) {
     // Repeated until no additional reductions can be achieved.
+    if (!SweepAndMerge()) break;
   }
 
   // Remove any groups that have vanished.
   for (GroupIdx group_idx = reduced_groups_.size() - 1; group_idx >= 0;
        --group_idx) {
-    if (intervals[num_primitives + group_idx].IsValid()) continue;
-    intervals.erase(intervals.begin() + num_primitives + group_idx);
+    if (IsValid(reduced_intervals_[num_primitives + group_idx])) continue;
+    reduced_intervals_.erase(reduced_intervals_.begin() + num_primitives +
+                             group_idx);
     reduced_groups_.erase(reduced_groups_.begin() + group_idx);
   }
-
-  // Create the reduced live matrix.
-  int64_t num_reduced_terms = 0;
-  reduced_live_.resize(num_lives);
-  for (PrimIdx prim_idx = 0; prim_idx < intervals.size(); ++prim_idx) {
-    for (LiveIdx live_idx = intervals[prim_idx].lower;
-         live_idx <= intervals[prim_idx].upper; ++live_idx) {
-      reduced_live_[live_idx].push_back(prim_idx);
-      ++num_reduced_terms;
-    }
-  }
-
-  // Add in any additional terms that will be needed to define groups.
-  for (const auto& group : reduced_groups_) num_reduced_terms += group.size();
-
-  LOG(INFO) << "Memory Term Reducer reduced number of terms from " << num_terms
-            << " to " << num_reduced_terms;
-  return num_reduced_terms;
 }
 
 const std::vector<std::vector<int64_t>>& MemoryTermReducer::GetReducedLive()
@@ -220,9 +271,70 @@ const std::vector<std::vector<int64_t>>& MemoryTermReducer::GetReducedLive()
   return reduced_live_;
 }
 
-const std::vector<absl::flat_hash_set<int64_t>>&
+const std::vector<std::pair<int64_t, int64_t>>&
+MemoryTermReducer::GetReducedIntervals() const {
+  return reduced_intervals_;
+}
+
+const std::vector<absl::btree_set<int64_t>>&
 MemoryTermReducer::GetReducedGroups() const {
   return reduced_groups_;
+}
+
+// Retrieves a reduced subset of time points (i.e., along the liveness
+// dimension) that are sufficient to establish memory constraints.
+absl::flat_hash_set<int64_t> MemoryTermReducer::GetReducedTimes(
+    int64_t num_primitives) {
+  return GetReducedTimes(num_primitives, reduced_intervals_, reduced_groups_);
+}
+
+absl::flat_hash_set<int64_t> MemoryTermReducer::GetReducedTimes(
+    int64_t num_primitives,
+    const std::vector<std::pair<int64_t, int64_t>>& reduced_intervals,
+    const std::vector<absl::btree_set<int64_t>>& reduced_groups) {
+  // First, reconstruct the original intervals of the primitives alone (since
+  // the start of a group does not necessarily correspond to the start of a
+  // primitive).
+  std::vector<std::pair<int64_t, int64_t>> intervals;
+  for (int64_t reduced_interval_idx = 0;
+       reduced_interval_idx < reduced_intervals.size();
+       ++reduced_interval_idx) {
+    const Interval& reduced_interval = reduced_intervals[reduced_interval_idx];
+    if (reduced_interval_idx < num_primitives) {
+      intervals.push_back(reduced_interval);
+      continue;
+    }
+    const GroupIdx group_idx = reduced_interval_idx - num_primitives;
+    for (const PrimIdx prim_idx : reduced_groups[group_idx]) {
+      Interval& interval = intervals[prim_idx];
+      if (!IsValid(interval)) {
+        interval.first = reduced_interval.first;
+        interval.second = reduced_interval.second;
+        continue;
+      }
+      interval.first = std::min(interval.first, reduced_interval.first);
+      interval.second = std::max(interval.second, reduced_interval.second);
+    }
+  }
+  // Next, created a sorted set of all entering & eviction times.
+  absl::btree_set<std::pair<int64_t, /*is_eviction=*/bool>> times;
+  for (const Interval& interval : intervals) {
+    if (!IsValid(interval)) continue;
+    times.insert({interval.first, false});
+    times.insert({interval.second, true});
+  }
+  // Finally, collect the latest entering times across all primitive intervals.
+  int64_t last_entering_time = -1;
+  absl::flat_hash_set<int64_t> reduced_times;
+  for (const auto& time : times) {
+    if (/*is_eviction*/ time.second) {
+      reduced_times.insert(last_entering_time);
+    } else {
+      last_entering_time = time.first;
+    }
+  }
+  reduced_times.insert(last_entering_time);
+  return reduced_times;
 }
 
 }  // namespace spmd

@@ -27,6 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/inlined_vector.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
@@ -276,7 +277,7 @@ class AsyncTracker {
 // Base class for the core scheduling algorithm.
 class SchedulerCore {
  public:
-  virtual Status InitializeScheduler(const HloModule* module) = 0;
+  virtual absl::Status InitializeScheduler(const HloModule* module) = 0;
   virtual absl::StatusOr<std::vector<HloInstruction*>> ScheduleComputation(
       const HloComputation* computation) = 0;
   virtual ~SchedulerCore() = default;
@@ -840,7 +841,7 @@ class DefaultSchedulerCore : public SchedulerCore {
         target_scheduling_rule_(target_scheduling_rule),
         early_target_scheduling_rule_(early_target_scheduling_rule),
         post_processing_fn_(post_processing_fn) {}
-  Status InitializeScheduler(const HloModule* module) override;
+  absl::Status InitializeScheduler(const HloModule* module) override;
   absl::StatusOr<std::vector<HloInstruction*>> ScheduleComputation(
       const HloComputation* computation) override;
   static bool AddOccupierToResource(
@@ -865,9 +866,9 @@ class DefaultSchedulerCore : public SchedulerCore {
       HloGraphNode* n, SchedulingState* sched_state) const;
   // Perform the scheduling of one or more instructions. Called every time the
   // ready set is not empty.
-  virtual Status SchedulingStep(SchedulingState* sched_state);
+  virtual absl::Status SchedulingStep(SchedulingState* sched_state);
   // Pick a node to schedule according to cost model.
-  virtual HloGraphNode* FindAndExtractBestNodeAvailable(
+  virtual absl::StatusOr<HloGraphNode*> FindAndExtractBestNodeAvailable(
       SchedulingState& sched_state,
       DefaultSchedulerCore::ShouldSkipNodeFunction should_skip_node);
   void DumpLatencyHidingSchedule(

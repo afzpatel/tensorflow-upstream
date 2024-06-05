@@ -1,7 +1,7 @@
 diff --ruN a/stablehlo/CMakeLists.txt b/stablehlo/CMakeLists.txt
 --- stablehlo/CMakeLists.txt
 +++ stablehlo/CMakeLists.txt
-@@ -13,153 +13,20 @@
+@@ -13,154 +13,20 @@
  # See the License for the specific language governing permissions and
  # limitations under the License.
  #
@@ -43,6 +43,7 @@ diff --ruN a/stablehlo/CMakeLists.txt b/stablehlo/CMakeLists.txt
  #-------------------------------------------------------------------------------
 -option(STABLEHLO_BUILD_EMBEDDED "Build StableHLO as part of another project" OFF)
 -option(STABLEHLO_ENABLE_BINDINGS_PYTHON "Enables StableHLO Python bindings" OFF)
+-option(STABLEHLO_ENABLE_PYTHON_TF_TESTS "Enables StableHLO to SavedModel tests requiring TF" OFF)
 -option(STABLEHLO_ENABLE_STRICT_BUILD "Build StableHLO with strict warnings and warnings as errors" OFF)
 -option(STABLEHLO_ENABLE_SANITIZER "Enable a sanitizer [OFF, address]" OFF)
 -option(STABLEHLO_ENABLE_SPLIT_DWARF "Enable split DWARF if the platform supports it" OFF)
@@ -174,6 +175,53 @@ diff --ruN a/stablehlo/stablehlo/CMakeLists.txt b/stablehlo/stablehlo/CMakeLists
  add_subdirectory(integrations)
  add_subdirectory(reference)
  add_subdirectory(tests)
+diff --ruN a/stablehlo/stablehlo/conversions/tosa/tests/binary.mlir b/stablehlo/stablehlo/conversions/tosa/tests/binary.mlir
+--- stablehlo/stablehlo/conversions/tosa/tests/binary.mlir
++++ stablehlo/stablehlo/conversions/tosa/tests/binary.mlir
+@@ -155,7 +155,7 @@
+ 
+ // CHECK-LABEL: @maximum_f64
+ func.func @maximum_f64(%arg0 : tensor<10xf64>, %arg1 : tensor<10xf64>) -> tensor<10xf64> {
+-  // CHECK: stablehlo.maximum
++  // CHECK: tosa.maximum
+   %0 = "stablehlo.maximum"(%arg0, %arg1) : (tensor<10xf64>, tensor<10xf64>) -> tensor<10xf64>
+   return %0 : tensor<10xf64>
+ }
+diff --ruN a/stablehlo/stablehlo/conversions/tosa/tests/nullary.mlir b/stablehlo/stablehlo/conversions/tosa/tests/nullary.mlir
+--- stablehlo/stablehlo/conversions/tosa/tests/nullary.mlir
++++ stablehlo/stablehlo/conversions/tosa/tests/nullary.mlir
+@@ -9,8 +9,7 @@
+ 
+ // CHECK-LABEL: @constant_f64
+ func.func @constant_f64() -> tensor<10xf64> {
+-  // TOSA does not support 64-bit types, so this should not legalize.
+-  // CHECK: stablehlo.constant
++  // CHECK: tosa.const
+   %0 = stablehlo.constant dense<0.000000e+00> : tensor<10xf64>
+   return %0 : tensor<10xf64>
+ }
+diff --ruN a/stablehlo/stablehlo/dialect/AssemblyFormat.cpp b/stablehlo/stablehlo/dialect/AssemblyFormat.cpp
+--- stablehlo/stablehlo/dialect/AssemblyFormat.cpp
++++ stablehlo/stablehlo/dialect/AssemblyFormat.cpp
+@@ -305,8 +305,7 @@
+ bool isCommutativeNoRegionMatchingDialect(OperationName innerOp,
+                                           StringRef reduceOpDialect) {
+   auto innerOpDialect = innerOp.getDialect();
+-  return innerOpDialect &&
+-         innerOpDialect->getNamespace().equals(reduceOpDialect) &&
++  return innerOpDialect && innerOpDialect->getNamespace() == reduceOpDialect &&
+          innerOp.hasTrait<mlir::OpTrait::NOperands<2>::Impl>() &&
+          innerOp.hasTrait<mlir::OpTrait::OneResult>() &&
+          (innerOp.hasTrait<mlir::hlo::OpTrait::IsCommutative>() ||
+@@ -359,7 +358,7 @@
+   // Check E5.
+   LLVM_DEBUG(llvm::dbgs() << "Checking ReduceOp compact print E5\n");
+   auto retOp = block.getTerminator();
+-  if (!retOp->getName().stripDialect().equals("return")) return false;
++  if (retOp->getName().stripDialect() != "return") return false;
+ 
+   return llvm::equal(innerOp.getResults(), retOp->getOperands());
+ }
 diff --ruN a/stablehlo/stablehlo/experimental/BUILD.bazel b/stablehlo/stablehlo/experimental/BUILD.bazel
 --- stablehlo/stablehlo/experimental/BUILD.bazel
 +++ stablehlo/stablehlo/experimental/BUILD.bazel
@@ -446,7 +494,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/CMakeLists.txt b/stablehlo
 diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp
 --- stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp
 +++ stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp
-@@ -0,0 +1,506 @@
+@@ -0,0 +1,505 @@
 +/* Copyright 2023 The StableHLO Authors.
 +
 +Licensed under the Apache License, Version 2.0 (the "License");
@@ -521,7 +569,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +  // reduce_window_i1
 +  SmallVector<ShapedType> inputTypes;
 +  for (auto [index, input] : llvm::enumerate(inputs)) {
-+    auto inputType = input.getType().dyn_cast<ShapedType>();
++    auto inputType = dyn_cast<ShapedType>(input.getType());
 +    inputTypes.push_back(inputType);
 +    if (!inputType)
 +      return op_.emitError()
@@ -531,7 +579,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +  // reduce_window_i2
 +  SmallVector<ShapedType> initValueTypes;
 +  for (auto [index, initValue] : llvm::enumerate(initValues)) {
-+    auto initValueType = initValue.getType().dyn_cast<ShapedType>();
++    auto initValueType = dyn_cast<ShapedType>(initValue.getType());
 +    initValueTypes.push_back(initValueType);
 +    if (!initValueType || !initValueType.hasRank() ||
 +        initValueType.getRank() != 0)
@@ -543,7 +591,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +  // reduce_window_i3...reduce_window_i7
 +  auto checkRank = [&](StringRef name, int64_t index, Value dynamicAttr,
 +                       int64_t expectedRank) -> LogicalResult {
-+    auto type = dynamicAttr.getType().dyn_cast<ShapedType>();
++    auto type = dyn_cast<ShapedType>(dynamicAttr.getType());
 +    if (!type || !type.hasRank() || type.getRank() != expectedRank ||
 +        !type.getElementType().isIntOrIndex()) {
 +      if (index < 0) index += op_->getNumOperands();
@@ -562,7 +610,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +    return failure();
 +
 +  // reduce_window_i7
-+  auto paddingType = getPadding().getType().dyn_cast<ShapedType>();
++  auto paddingType = dyn_cast<ShapedType>(getPadding().getType());
 +  if (!paddingType || !paddingType.hasRank() || paddingType.getRank() != 2 ||
 +      paddingType.getDimSize(1) != 2 ||
 +      !paddingType.getElementType().isIntOrIndex())
@@ -598,7 +646,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +  // verify them in that case, that seems like too much at this point.
 +  auto checkShape = [&](StringRef name, int64_t index, Value dynamicAttr,
 +                        ArrayRef<int64_t> expectedShape) -> LogicalResult {
-+    auto type = dynamicAttr.getType().cast<ShapedType>();
++    auto type = cast<ShapedType>(dynamicAttr.getType());
 +    if (type.getShape() != expectedShape) {
 +      if (index < 0) index += op_->getNumOperands();
 +      return op_.emitError()
@@ -622,7 +670,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +  // reduce_window_c13
 +  if (op_.getCalledComputations().size() != 1)
 +    return op_.emitError() << "expects called_computations to have 1 element";
-+  auto bodyAttr = op_.getCalledComputations()[0].cast<FlatSymbolRefAttr>();
++  auto bodyAttr = cast<FlatSymbolRefAttr>(op_.getCalledComputations()[0]);
 +  auto bodyFunc =
 +      op_->getParentOfType<ModuleOp>().lookupSymbol<func::FuncOp>(bodyAttr);
 +  if (!bodyFunc)
@@ -644,7 +692,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +  SmallVector<ShapedType> resultTypes;
 +  std::optional<ArrayRef<int64_t>> resultShape;
 +  for (auto result : results) {
-+    auto resultType = result.getType().dyn_cast<ShapedType>();
++    auto resultType = dyn_cast<ShapedType>(result.getType());
 +    resultTypes.push_back(resultType);
 +    if (!resultType) return op_.emitError() << "expects results to be tensors";
 +
@@ -683,32 +731,32 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +}
 +
 +TypedValue<ShapedType> DynamicReduceWindowOpAdaptor::getWindowDimensions() {
-+  return op_.getInputs()[op_.getInputs().size() - 5]
-+      .cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(
++      op_.getInputs()[op_.getInputs().size() - 5]);
 +}
 +
 +TypedValue<ShapedType> DynamicReduceWindowOpAdaptor::getWindowStrides() {
-+  return op_.getInputs()[op_.getInputs().size() - 4]
-+      .cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(
++      op_.getInputs()[op_.getInputs().size() - 4]);
 +}
 +
 +TypedValue<ShapedType> DynamicReduceWindowOpAdaptor::getBaseDilations() {
-+  return op_.getInputs()[op_.getInputs().size() - 3]
-+      .cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(
++      op_.getInputs()[op_.getInputs().size() - 3]);
 +}
 +
 +TypedValue<ShapedType> DynamicReduceWindowOpAdaptor::getWindowDilations() {
-+  return op_.getInputs()[op_.getInputs().size() - 2]
-+      .cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(
++      op_.getInputs()[op_.getInputs().size() - 2]);
 +}
 +
 +TypedValue<ShapedType> DynamicReduceWindowOpAdaptor::getPadding() {
-+  return op_.getInputs()[op_.getInputs().size() - 1]
-+      .cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(
++      op_.getInputs()[op_.getInputs().size() - 1]);
 +}
 +
 +Region& DynamicReduceWindowOpAdaptor::getBody() {
-+  auto bodyAttr = op_.getCalledComputations()[0].cast<FlatSymbolRefAttr>();
++  auto bodyAttr = cast<FlatSymbolRefAttr>(op_.getCalledComputations()[0]);
 +  auto bodyFunc =
 +      op_->getParentOfType<ModuleOp>().lookupSymbol<func::FuncOp>(bodyAttr);
 +  return bodyFunc.getBody();
@@ -758,20 +806,20 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +  auto output = op_.getResults()[1];
 +
 +  // dynamic_rng_bit_generator_i1
-+  if (!rngAlgorithmAttr.isa<RngAlgorithmAttr>())
++  if (!isa<RngAlgorithmAttr>(rngAlgorithmAttr))
 +    return op_.emitError()
 +           << "expects a #stablehlo<rng_algorithm ...> rng_algorithm";
 +
 +  // dynamic_rng_bit_generator_i2
 +  // TODO(#643): Clarify supported types for RngBitGeneratorOp.
-+  auto initialStateType = initialState.getType().dyn_cast<ShapedType>();
++  auto initialStateType = dyn_cast<ShapedType>(initialState.getType());
 +  if (!initialStateType || !initialStateType.getElementType().isIntOrFloat())
 +    return op_.emitError()
 +           << "expects initial_state (operand #0) "
 +           << "to be a tensor of integer or floating-point type";
 +
 +  // dynamic_rng_bit_generator_i3
-+  auto outputShapeType = outputShape.getType().dyn_cast<ShapedType>();
++  auto outputShapeType = dyn_cast<ShapedType>(outputShape.getType());
 +  if (!outputShapeType || !outputShapeType.hasRank() ||
 +      outputShapeType.getRank() != 1 ||
 +      !outputShapeType.getElementType().isIntOrIndex())
@@ -781,14 +829,14 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +
 +  // dynamic_rng_bit_generator_o1
 +  // TODO(#643): Clarify supported types for RngBitGeneratorOp.
-+  auto outputStateType = outputState.getType().dyn_cast<ShapedType>();
++  auto outputStateType = dyn_cast<ShapedType>(outputState.getType());
 +  if (!outputStateType || !outputStateType.getElementType().isIntOrFloat())
 +    return op_.emitError()
 +           << "expects output_state (result #0) "
 +           << "to be a tensor of integer or floating-point type";
 +
 +  // dynamic_rng_bit_generator_o2
-+  auto outputType = output.getType().dyn_cast<ShapedType>();
++  auto outputType = dyn_cast<ShapedType>(output.getType());
 +  if (!outputType || !outputType.getElementType().isIntOrFloat())
 +    return op_.emitError()
 +           << "expects output (result #1) "
@@ -812,25 +860,24 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +}
 +
 +RngAlgorithm DynamicRngBitGeneratorOpAdaptor::getRngAlgorithm() {
-+  return op_->getDiscardableAttr("rng_algorithm")
-+      .cast<RngAlgorithmAttr>()
++  return cast<RngAlgorithmAttr>(op_->getDiscardableAttr("rng_algorithm"))
 +      .getValue();
 +}
 +
 +TypedValue<ShapedType> DynamicRngBitGeneratorOpAdaptor::getInitialState() {
-+  return op_.getInputs()[0].cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(op_.getInputs()[0]);
 +}
 +
 +TypedValue<ShapedType> DynamicRngBitGeneratorOpAdaptor::getOutputShape() {
-+  return op_.getInputs()[1].cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(op_.getInputs()[1]);
 +}
 +
 +TypedValue<ShapedType> DynamicRngBitGeneratorOpAdaptor::getOutputState() {
-+  return op_.getResults()[0].cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(op_.getResults()[0]);
 +}
 +
 +TypedValue<ShapedType> DynamicRngBitGeneratorOpAdaptor::getOutput() {
-+  return op_.getResults()[1].cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(op_.getResults()[1]);
 +}
 +
 +std::optional<DynamicRngBitGeneratorOpAdaptor> getDynamicRngBitGeneratorOp(
@@ -864,7 +911,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +  auto indices = op_.getResults()[1];
 +
 +  // dynamic_top_k_i1
-+  auto operandType = operand.getType().dyn_cast<ShapedType>();
++  auto operandType = dyn_cast<ShapedType>(operand.getType());
 +  if (!operandType || !operandType.hasRank() || operandType.getRank() < 1 ||
 +      !operandType.getElementType().isIntOrFloat())
 +    return op_.emitError()
@@ -873,7 +920,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +           << "of rank at least 1";
 +
 +  // dynamic_top_k_i2
-+  auto kType = k.getType().dyn_cast<ShapedType>();
++  auto kType = dyn_cast<ShapedType>(k.getType());
 +  if (!kType || !kType.hasRank() || kType.getRank() != 0 ||
 +      !kType.getElementType().isIntOrIndex())
 +    return op_.emitError()
@@ -881,7 +928,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +           << "to be a 0-dimensional tensor of integer or index type";
 +
 +  // dynamic_top_k_o1
-+  auto valuesType = values.getType().dyn_cast<ShapedType>();
++  auto valuesType = dyn_cast<ShapedType>(values.getType());
 +  if (!valuesType || !valuesType.hasRank() || valuesType.getRank() < 1 ||
 +      !valuesType.getElementType().isIntOrFloat())
 +    return op_.emitError()
@@ -890,7 +937,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +           << "of rank at least 1";
 +
 +  // dynamic_top_k_o2
-+  auto indicesType = indices.getType().dyn_cast<ShapedType>();
++  auto indicesType = dyn_cast<ShapedType>(indices.getType());
 +  if (!indicesType || !indicesType.hasRank() || indicesType.getRank() < 1 ||
 +      !indicesType.getElementType().isSignlessInteger(32))
 +    return op_.emitError() << "expects indices (result #1) "
@@ -930,19 +977,19 @@ diff --ruN a/stablehlo/stablehlo/experimental/dialect/StablehloOps.cpp b/stableh
 +}
 +
 +TypedValue<ShapedType> DynamicTopKOpAdaptor::getOperand() {
-+  return op_.getInputs()[0].cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(op_.getInputs()[0]);
 +}
 +
 +TypedValue<ShapedType> DynamicTopKOpAdaptor::getK() {
-+  return op_.getInputs()[1].cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(op_.getInputs()[1]);
 +}
 +
 +TypedValue<ShapedType> DynamicTopKOpAdaptor::getValues() {
-+  return op_.getResults()[0].cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(op_.getResults()[0]);
 +}
 +
 +TypedValue<ShapedType> DynamicTopKOpAdaptor::getIndices() {
-+  return op_.getResults()[1].cast<TypedValue<ShapedType>>();
++  return cast<TypedValue<ShapedType>>(op_.getResults()[1]);
 +}
 +
 +std::optional<DynamicTopKOpAdaptor> getDynamicTopKOp(CustomCallOp op) {
@@ -1422,17 +1469,17 @@ diff --ruN a/stablehlo/stablehlo/experimental/tests/stablehlo_canonicalize_dynam
 +// CHECK-LABEL: func @dynamic_reduce_window_success_static_result_type
 +func.func @dynamic_reduce_window_success_static_result_type(%arg0: tensor<3x2xf32>, %arg1: tensor<f32>) -> tensor<2x2xf32> {
 +  //           CHECK-NOT: stablehlo.dynamic_reduce_window
-+  //               CHECK: "stablehlo.reduce_window"(%arg0, %arg1) ({
-+  //          CHECK-NEXT:   ^[[BB:bb.*]](%[[ARG2:arg.*]]: tensor<f32>, %[[ARG3:arg.*]]: tensor<f32>):
-+  //          CHECK-NEXT:     %[[VAL1:.*]] = stablehlo.add %arg2, %arg3 : tensor<f32>
-+  //          CHECK-NEXT:     stablehlo.return %[[VAL1]] : tensor<f32>
-+  //          CHECK-NEXT: }) {
++  //               CHECK: "stablehlo.reduce_window"(%arg0, %arg1) <{
 +  //          CHECK-SAME:   base_dilations = array<i64: 2, 1>,
 +  // CHECK-SAME{LITERAL}:   padding = dense<[[2, 1], [0, 0]]> : tensor<2x2xi64>,
 +  //          CHECK-SAME:   window_dilations = array<i64: 3, 1>,
 +  //          CHECK-SAME:   window_dimensions = array<i64: 2, 1>,
 +  //          CHECK-SAME:   window_strides = array<i64: 4, 1>
-+  //          CHECK-SAME: } : (tensor<3x2xf32>, tensor<f32>) -> tensor<2x2xf32>
++  //          CHECK-SAME: }> ({
++  //          CHECK-NEXT:   ^[[BB:bb.*]](%[[ARG2:arg.*]]: tensor<f32>, %[[ARG3:arg.*]]: tensor<f32>):
++  //          CHECK-NEXT:     %[[VAL1:.*]] = stablehlo.add %arg2, %arg3 : tensor<f32>
++  //          CHECK-NEXT:     stablehlo.return %[[VAL1]] : tensor<f32>
++  //          CHECK-NEXT: }) : (tensor<3x2xf32>, tensor<f32>) -> tensor<2x2xf32>
 +  %0 = stablehlo.constant dense<[2, 1]> : tensor<2xi64>
 +  %1 = stablehlo.constant dense<[4, 1]> : tensor<2xi64>
 +  %2 = stablehlo.constant dense<[2, 1]> : tensor<2xi64>
@@ -1454,17 +1501,17 @@ diff --ruN a/stablehlo/stablehlo/experimental/tests/stablehlo_canonicalize_dynam
 +// CHECK-LABEL: func @dynamic_reduce_window_success_dynamic_result_type
 +func.func @dynamic_reduce_window_success_dynamic_result_type(%arg0: tensor<?x2xf32>, %arg1: tensor<f32>) -> tensor<?x2xf32> {
 +  //           CHECK-NOT: stablehlo.dynamic_reduce_window
-+  //               CHECK: "stablehlo.reduce_window"(%arg0, %arg1) ({
-+  //          CHECK-NEXT:   ^[[BB:bb.*]](%[[ARG2:arg.*]]: tensor<f32>, %[[ARG3:arg.*]]: tensor<f32>):
-+  //          CHECK-NEXT:     %[[VAL1:.*]] = stablehlo.add %arg2, %arg3 : tensor<f32>
-+  //          CHECK-NEXT:     stablehlo.return %[[VAL1]] : tensor<f32>
-+  //          CHECK-NEXT: }) {
++  //               CHECK: "stablehlo.reduce_window"(%arg0, %arg1) <{
 +  //          CHECK-SAME:   base_dilations = array<i64: 2, 1>,
 +  // CHECK-SAME{LITERAL}:   padding = dense<[[2, 1], [0, 0]]> : tensor<2x2xi64>,
 +  //          CHECK-SAME:   window_dilations = array<i64: 3, 1>,
 +  //          CHECK-SAME:   window_dimensions = array<i64: 2, 1>,
 +  //          CHECK-SAME:   window_strides = array<i64: 4, 1>
-+  //          CHECK-SAME: } : (tensor<?x2xf32>, tensor<f32>) -> tensor<?x2xf32>
++  //          CHECK-SAME: }> ({
++  //          CHECK-NEXT:   ^[[BB:bb.*]](%[[ARG2:arg.*]]: tensor<f32>, %[[ARG3:arg.*]]: tensor<f32>):
++  //          CHECK-NEXT:     %[[VAL1:.*]] = stablehlo.add %arg2, %arg3 : tensor<f32>
++  //          CHECK-NEXT:     stablehlo.return %[[VAL1]] : tensor<f32>
++  //          CHECK-NEXT: }) : (tensor<?x2xf32>, tensor<f32>) -> tensor<?x2xf32>
 +  %0 = stablehlo.constant dense<[2, 1]> : tensor<2xi64>
 +  %1 = stablehlo.constant dense<[4, 1]> : tensor<2xi64>
 +  %2 = stablehlo.constant dense<[2, 1]> : tensor<2xi64>
@@ -2057,7 +2104,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/transforms/ChloRecomposeOps.cpp b/
 +    auto res = verifyCustomCallOpAttributes(
 +        op, rewriter, [&](NamedAttribute attr) -> LogicalResult {
 +          if (attr.getName() != "largest") return success();
-+          if (attr.getValue().cast<BoolAttr>().getValue() == false)
++          if (cast<BoolAttr>(attr.getValue()).getValue() == false)
 +            return rewriter.notifyMatchFailure(
 +                op, "largest = false is not supported.");
 +          return success();
@@ -2319,7 +2366,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/transforms/StablehloCanonicalizeDy
 +    // the verifier to make sure that its value is consistent with result type.
 +    if (!succeeded(hlo::matchInts(op.getOutputShape())))
 +      return rewriter.notifyMatchFailure(op, "expected static output_shape");
-+    if (!op.getOutput().getType().cast<ShapedType>().hasStaticShape())
++    if (!cast<ShapedType>(op.getOutput().getType()).hasStaticShape())
 +      return rewriter.notifyMatchFailure(op, "expected static output type");
 +    rewriter.replaceOpWithNewOp<RngBitGeneratorOp>(
 +        op, op->getResultTypes(), op.getRngAlgorithm(), op.getInitialState());
@@ -2341,7 +2388,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/transforms/StablehloCanonicalizeDy
 +      return rewriter.notifyMatchFailure(impl, "expected constant k");
 +
 +    // We rely on many of the properties checked by verification.
-+    auto valuesType = op.getValues().getType().cast<ShapedType>();
++    auto valuesType = cast<ShapedType>(op.getValues().getType());
 +    auto valuesLastDimSize = valuesType.getShape()[valuesType.getRank() - 1];
 +    if (hlo::isDynamicDimSize(valuesLastDimSize) ||
 +        valuesLastDimSize != k[0])
@@ -2493,7 +2540,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/transforms/StablehloRefineShapes.c
 +    // At the moment, we only support refining return types using fully static
 +    // shape values which serves the current use cases well.
 +    // Support for partially static shape values is left for future work.
-+    auto initialStateType = op.getInitialState().getType().cast<ShapedType>();
++    auto initialStateType = cast<ShapedType>(op.getInitialState().getType());
 +    SmallVector<int64_t> outputShape;
 +    if (failed(hlo::matchInts(op.getOutputShape(), outputShape)))
 +      return rewriter.notifyMatchFailure(op, "expected constant output_shape");
@@ -2513,7 +2560,7 @@ diff --ruN a/stablehlo/stablehlo/experimental/transforms/StablehloRefineShapes.c
 +    if (!maybeOp || failed(maybeOp->verify())) return failure();
 +    DynamicTopKOpAdaptor op = *maybeOp;
 +
-+    auto operandType = op.getOperand().getType().cast<ShapedType>();
++    auto operandType = cast<ShapedType>(op.getOperand().getType());
 +    SmallVector<int64_t> outputShape(operandType.getShape());
 +    SmallVector<int64_t> k;
 +    if (failed(hlo::matchInts(op.getK(), k)))
@@ -2564,76 +2611,37 @@ diff --ruN a/stablehlo/stablehlo/experimental/transforms/StablehloRefineShapes.c
 +}  // namespace experimental
 +}  // namespace stablehlo
 +}  // namespace mlir
-diff --ruN a/stablehlo/stablehlo/reference/Ops.cpp b/stablehlo/stablehlo/reference/Ops.cpp
---- stablehlo/stablehlo/reference/Ops.cpp
-+++ stablehlo/stablehlo/reference/Ops.cpp
-@@ -16,6 +16,7 @@
- #include "stablehlo/reference/Ops.h"
+diff --ruN a/stablehlo/stablehlo/reference/Api.cpp b/stablehlo/stablehlo/reference/Api.cpp
+--- stablehlo/stablehlo/reference/Api.cpp
++++ stablehlo/stablehlo/reference/Api.cpp
+@@ -51,7 +51,7 @@
+   auto functions = module.getOps<func::FuncOp>();
  
- #include <algorithm>
-+#include <cstdint>
+   for (auto funcOp : functions)
+-    if (funcOp.getSymName().equals(mainName)) return funcOp;
++    if (funcOp.getSymName() == mainName) return funcOp;
  
- #include "llvm/ADT/APFloat.h"
- #include "llvm/ADT/APInt.h"
-@@ -1428,23 +1429,23 @@
-                         inputSpatialDimensions.end());
-   lhsPermutation.push_back(inputFeatureDimension);
+   bool isSingleFunction =
+       std::distance(functions.begin(), functions.end()) == 1;
+@@ -68,7 +68,7 @@
+ class DefaultInterpreterFallback : public InterpreterFallback {
+  public:
+   DefaultInterpreterFallback(const InterpreterConfiguration &config)
+-      : config(config){};
++      : config(config) {};
  
--  auto lhsWindowDimensions =
--      concatAndPermute(lhs.getShape()[inputBatchDimension],
--                       extractElements(rhs.getShape(), kernelSpatialDimensions),
--                       lhs.getShape()[inputFeatureDimension], lhsPermutation);
--
--  auto lhsWindowStrides =
--      concatAndPermute(1L, llvm::to_vector(windowStrides), 1L, lhsPermutation);
-+  auto lhsWindowDimensions = concatAndPermute<int64_t>(
-+      lhs.getShape()[inputBatchDimension],
-+      extractElements(rhs.getShape(), kernelSpatialDimensions),
-+      lhs.getShape()[inputFeatureDimension], lhsPermutation);
-+
-+  auto lhsWindowStrides = concatAndPermute<int64_t>(
-+      1L, llvm::to_vector(windowStrides), 1L, lhsPermutation);
+   virtual llvm::Error operator()(Operation &op, Scope &scope,
+                                  Process *process) final {
+diff --ruN a/stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp b/stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp
+--- stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp
++++ stablehlo/stablehlo/transforms/StablehloRefineShapes.cpp
+@@ -764,7 +764,7 @@
  
-   auto lhsBaseDilations =
--      concatAndPermute(0L, Sizes(lhsDilation) - 1, 0L, lhsPermutation);
--
--  auto lhsWindowDilations =
--      concatAndPermute(1L, llvm::to_vector(rhsDilation), 1L, lhsPermutation);
-+      concatAndPermute<int64_t>(0L, Sizes(lhsDilation) - 1, 0L, lhsPermutation);
-+
-+  auto lhsWindowDilations = concatAndPermute<int64_t>(
-+      1L, llvm::to_vector(rhsDilation), 1L, lhsPermutation);
- 
-   Sizes lhsPaddingLow, lhsPaddingHigh;
--  for (auto paddingPair : concatAndPermute({0, 0}, llvm::to_vector(padding),
--                                           {0, 0}, lhsPermutation)) {
-+  for (auto paddingPair : concatAndPermute<std::pair<int64_t, int64_t>>(
-+           {0, 0}, llvm::to_vector(padding), {0, 0}, lhsPermutation)) {
-     lhsPaddingLow.push_back(paddingPair.first);
-     lhsPaddingHigh.push_back(paddingPair.second);
-   }
-@@ -1461,8 +1462,8 @@
-   for (; outputSpatialIndexIt != outputSpatialIndexItEnd;
-        ++outputSpatialIndexIt) {
-     Sizes lhsWindowStart;
--    for (auto [i, offset] : llvm::enumerate(
--             concatAndPermute(0L, *outputSpatialIndexIt, 0L, lhsPermutation)))
-+    for (auto [i, offset] : llvm::enumerate(concatAndPermute<int64_t>(
-+             0L, *outputSpatialIndexIt, 0L, lhsPermutation)))
-       lhsWindowStart.push_back(lhsWindowStrides[i] * offset);
- 
-     Sizes limitIndices;
-@@ -1507,9 +1508,9 @@
-     for (auto dotProductIt = dotProduct.index_begin();
-          dotProductIt != dotProduct.index_end();
-          ++dotProductIt, ++resultNonSpatialIt) {
--      Index resultIndex(
--          concatAndPermute((*resultNonSpatialIt)[0], *outputSpatialIndexIt,
--                           (*resultNonSpatialIt)[1], resultPermutation));
-+      Index resultIndex(concatAndPermute<int64_t>(
-+          (*resultNonSpatialIt)[0], *outputSpatialIndexIt,
-+          (*resultNonSpatialIt)[1], resultPermutation));
-       result.set(resultIndex, dotProduct.get(*dotProductIt));
-     }
-   }
+     // Clean up operand buffers after refinement
+     // Must do in this pattern to avoid needing multiple refinement iterations
+-    if (op.getCallTargetName().equals(kCustomCallOperandBarrierTarget)) {
++    if (op.getCallTargetName() == kCustomCallOperandBarrierTarget) {
+       Value operand = op.getOperand(0);
+       if (operand.getType() == op.getResult(0).getType()) {
+         op.replaceAllUsesWith(ValueRange(operand));
 

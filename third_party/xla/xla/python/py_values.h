@@ -32,8 +32,8 @@ limitations under the License.
 #include "xla/python/ifrt/device.h"
 #include "xla/python/ifrt/memory.h"
 #include "xla/python/nb_numpy.h"
+#include "xla/tsl/concurrency/ref_count.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/concurrency/ref_count.h"
 
 namespace xla {
 
@@ -72,7 +72,7 @@ struct DevicePutResult {
 // to execute.
 //
 // May throw exceptions from nanobind in addition to failing via an error
-// Status. (We could catch these if needed, but there seems little point.)
+// absl::Status. (We could catch these if needed, but there seems little point.)
 struct DevicePutOptions {
   bool squash_64bit_types = false;
   bool allow_zero_copy = true;

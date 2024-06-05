@@ -33,8 +33,8 @@ namespace xla {
 
 namespace {
 
-Status CompileAndExecute(XlaBuilder* builder, XlaOp root, int device_id,
-                         PjRtClient* client) {
+absl::Status CompileAndExecute(XlaBuilder* builder, XlaOp root, int device_id,
+                               PjRtClient* client) {
   XlaComputation computation = builder->Build(root).value();
 
   CompileOptions compile_options;
@@ -79,7 +79,8 @@ class Accumulator {
 
 // TODO(necula): update this test for the TFRT CPU client, which current does
 // not support non-local devices.
-// StatusOr<std::unique_ptr<PjRtClient>> GetCpuClientWithNonLocalDevice() {
+// absl::StatusOr<std::unique_ptr<PjRtClient>> GetCpuClientWithNonLocalDevice()
+// {
 //   TF_ASSIGN_OR_RETURN(se::Platform * platform,
 //                       PlatformUtil::GetPlatform("Host"));
 //   if (platform->VisibleDeviceCount() <= 0) {
@@ -265,8 +266,15 @@ TEST(OutfeedReceiverTest, DifferentShapeForConsumerIdError) {
   absl::StatusOr<XlaOp> send1 = outfeed_receiver->AddOutfeedToBuilder(
       &builder, send0, consumer_id0, {data1}, 0);
   EXPECT_FALSE(send1.ok());
-  EXPECT_THAT(send1.status().ToString(),
-              testing::HasSubstr("does not match previous shape element_type"));
+  EXPECT_THAT(
+      send1.status().ToString(),
+      testing::ContainsRegex(
+#if defined(PLATFORM_WINDOWS)
+          "does not match previous shape \\w*/*\\w* *\\n?element_type"));
+#else
+          "does not match previous shape (go/\\w+[ "
+          "]+\\n)?element_type"));
+#endif
 }
 
 TEST(OutfeedReceiverTest, InvalidConsumerIdError) {

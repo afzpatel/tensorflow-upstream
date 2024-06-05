@@ -39,6 +39,7 @@ limitations under the License.
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/Parser/Parser.h"  // from @llvm-project
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
+#include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Transforms/Passes.h"  // from @llvm-project
 #include "stablehlo/dialect/Register.h"  // from @stablehlo
@@ -58,12 +59,12 @@ namespace xla {
 namespace {
 
 static mlir::Attribute ArrayToElements(mlir::Attribute attr) {
-  if (auto array = attr.dyn_cast<mlir::DenseI64ArrayAttr>()) {
+  if (auto array = mlir::dyn_cast<mlir::DenseI64ArrayAttr>(attr)) {
     return mlir::DenseIntElementsAttr::get(
         mlir::RankedTensorType::get(array.size(), array.getElementType()),
         array.asArrayRef());
   }
-  if (auto array = attr.dyn_cast<mlir::DenseBoolArrayAttr>()) {
+  if (auto array = mlir::dyn_cast<mlir::DenseBoolArrayAttr>(attr)) {
     return mlir::DenseIntElementsAttr::get(
         mlir::RankedTensorType::get(array.size(), array.getElementType()),
         array.asArrayRef());
@@ -192,9 +193,9 @@ void UpgradeStablehlo(mlir::ModuleOp module) {
 
 }  // namespace
 
-Status MlirToXlaComputation(mlir::ModuleOp module,
-                            XlaComputation& xla_computation,
-                            bool use_tuple_args, bool return_tuple) {
+absl::Status MlirToXlaComputation(mlir::ModuleOp module,
+                                  XlaComputation& xla_computation,
+                                  bool use_tuple_args, bool return_tuple) {
   mlir::BaseScopedDiagnosticHandler diagnostic_handler(module->getContext());
   {
     mlir::PassManager pm(module->getContext());
@@ -226,7 +227,7 @@ Status MlirToXlaComputation(mlir::ModuleOp module,
   return OkStatus();
 }
 
-StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> ParseMlirModuleString(
+absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> ParseMlirModuleString(
     absl::string_view mlir_module_str, mlir::MLIRContext& context) {
   mlir::DialectRegistry registry;
   registry.insert<mlir::arith::ArithDialect>();
@@ -266,7 +267,7 @@ StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> ParseMlirModuleString(
   return std::move(module);
 }
 
-Status ParseMlirModuleStringAndConvertToXlaComputation(
+absl::Status ParseMlirModuleStringAndConvertToXlaComputation(
     absl::string_view mlir_module_str, XlaComputation& xla_computation,
     bool use_tuple_args, bool return_tuple) {
   mlir::MLIRContext context;
@@ -333,7 +334,7 @@ absl::StatusOr<std::string> SerializeUsingVersionedStablehlo(
   return buffer;
 }
 
-Status UpgradeVersionedStablehlo(mlir::ModuleOp mlir_module) {
+absl::Status UpgradeVersionedStablehlo(mlir::ModuleOp mlir_module) {
   // Apply StableHLO bytecode patch
   UpgradeStablehlo(mlir_module);
 

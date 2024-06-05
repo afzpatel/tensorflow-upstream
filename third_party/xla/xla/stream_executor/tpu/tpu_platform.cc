@@ -26,10 +26,10 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "xla/stream_executor/event.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "xla/stream_executor/stream_executor_interface.h"
 #include "xla/stream_executor/tpu/c_api_decl.h"
 #include "xla/stream_executor/tpu/status_helper.h"
 #include "xla/stream_executor/tpu/tpu_api.h"
@@ -39,15 +39,13 @@ limitations under the License.
 #include "xla/stream_executor/tpu/tpu_platform_interface.h"
 #include "xla/stream_executor/tpu/tpu_topology.h"
 #include "tsl/platform/logging.h"  // IWYU pragma: keep
+#include "tsl/platform/status.h"
 
 namespace tensorflow {
 namespace tpu {
 
 const ::stream_executor::Platform::Id TpuPlatform::kId = GetTpuPlatformId();
 TpuPlatform* tpu_registered_platform = nullptr;
-
-template <typename T>
-using StatusOr = ::absl::StatusOr<T>;
 
 TpuPlatform::TpuPlatform() : name_("TPU") {
   platform_ = stream_executor::tpu::ExecutorApiFn()->TpuPlatform_NewFn();
@@ -98,13 +96,13 @@ int TpuPlatform::VisibleDeviceCount() const {
       ->TpuPlatform_VisibleDeviceCountFn(platform_);
 }
 
-StatusOr<::stream_executor::StreamExecutor*> TpuPlatform::GetExecutor(
+absl::StatusOr<::stream_executor::StreamExecutor*> TpuPlatform::GetExecutor(
     const ::stream_executor::StreamExecutorConfig& config) {
   return executor_cache_.GetOrCreate(
       config, [&]() { return GetUncachedExecutor(config); });
 }
 
-StatusOr<std::unique_ptr<::stream_executor::StreamExecutor>>
+absl::StatusOr<std::unique_ptr<::stream_executor::StreamExecutor>>
 TpuPlatform::GetUncachedExecutor(
     const ::stream_executor::StreamExecutorConfig& config) {
   SE_StreamExecutorConfig* c_config = stream_executor::tpu::ExecutorApiFn()
@@ -122,9 +120,8 @@ TpuPlatform::GetUncachedExecutor(
   if (!status.ok()) {
     return status.status();
   }
-  return std::make_unique<stream_executor::StreamExecutor>(
-      this, std::make_unique<stream_executor::tpu::TpuExecutor>(
-                this, executor, config.ordinal));
+  return std::make_unique<stream_executor::tpu::TpuExecutor>(this, executor,
+                                                             config.ordinal);
 }
 
 ::stream_executor::Platform::Id TpuPlatform::id() const {

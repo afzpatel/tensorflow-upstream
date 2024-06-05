@@ -34,7 +34,6 @@ limitations under the License.
 
 #include "absl/base/attributes.h"
 #include "absl/base/casts.h"
-#include "absl/base/config.h"
 #include "absl/functional/function_ref.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -45,13 +44,14 @@ limitations under the License.
 #include "xla/index_util.h"
 #include "xla/layout.h"
 #include "xla/layout_util.h"
+#include "xla/maybe_owning.h"
 #include "xla/primitive_util.h"
 #include "xla/printer.h"
 #include "xla/shape.h"
+#include "xla/shape_tree.h"
 #include "xla/shape_util.h"
 #include "xla/status.h"
 #include "xla/status_macros.h"
-#include "xla/statusor.h"
 #include "xla/types.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
@@ -115,7 +115,7 @@ class LiteralBase {
   // compatibility.  If compatibility is required, you should use protobuf
   // serialization instead.
   template <typename OutputIterator>
-  Status Serialize(OutputIterator output) const {
+  absl::Status Serialize(OutputIterator output) const {
     return SerializeWithShapeProto(shape().ToProto(), output);
   }
 
@@ -366,10 +366,36 @@ class LiteralBase {
           }
 
           CHECK(LayoutUtil::IsDenseArray(subshape));
+          const int64_t size_bytes = literal.size_bytes(index);
+          const int64_t bytes_to_hash = std::min(size_bytes, kByteLimit);
+          // When layout insensitive, we need to hash the data bytes in logical
+          // order rather than physical order.
+          const bool use_physical_order =
+              kIsLayoutSensitive || !subshape.has_layout();
           auto data = absl::MakeConstSpan(
               static_cast<const char*>(literal.untyped_data(index)),
-              std::min(kByteLimit, literal.size_bytes(index)));
-          state = H::combine(std::move(state), data);
+              size_bytes);
+          if (use_physical_order) {
+            state = H::combine(std::move(state), data.first(bytes_to_hash));
+            return;
+          }
+          const int64_t elem_size =
+              ShapeUtil::ByteSizeOfPrimitiveType(subshape.element_type());
+          absl::Span<const int64_t> minor_to_major =
+              subshape.layout().minor_to_major();
+          DimensionVector elem_index(subshape.dimensions_size());
+          absl::Span<int64_t> elem_index_span(elem_index.data(),
+                                              elem_index.size());
+          int64_t bytes_hashed = 0;
+          while (bytes_hashed < bytes_to_hash) {
+            int64_t offset =
+                elem_size * IndexUtil::MultidimensionalIndexToLinearIndex(
+                                subshape, minor_to_major, elem_index);
+            state =
+                H::combine(std::move(state), data.subspan(offset, elem_size));
+            if (!IndexUtil::BumpIndices(subshape, elem_index_span)) return;
+            bytes_hashed += elem_size;
+          }
         });
 
     return std::move(state);
@@ -492,9 +518,15 @@ class LiteralBase {
   static Literal CreateFromShapeWithUndeterminedLeafArrays(const Shape& shape);
 
  protected:
+  class Piece;
+
+  // Recursively builds the subtree for the given piece and sets the subshapes
+  // of the given piece with the given shape.
+  void BuildPieceSubtree(const Shape& shape, Piece* piece);
+
   template <typename OutputIterator>
-  Status SerializeWithShapeProto(const ShapeProto& proto,
-                                 OutputIterator output) const;
+  absl::Status SerializeWithShapeProto(const ShapeProto& proto,
+                                       OutputIterator output) const;
 
   template <typename OutputIterator>
   class SerializeState {
@@ -510,8 +542,7 @@ class LiteralBase {
     void WriteElement(NativeT element) {
       constexpr PrimitiveType primitive_type =
           primitive_util::NativeToPrimitiveType<NativeT>();
-      static_assert(primitive_type != PRED);
-      static_assert(!primitive_util::Is4BitType(primitive_type));
+      static_assert(primitive_util::BitWidth(primitive_type) % 8 == 0);
       if constexpr (primitive_util::IsComplexType(primitive_type)) {
         WriteElement(element.real());
         WriteElement(element.imag());
@@ -536,40 +567,36 @@ class LiteralBase {
 
     template <typename NativeT>
     void WriteElements(absl::Span<const NativeT> elements) {
-      if constexpr (std::is_same_v<NativeT, bool>) {
-        int64_t bytes = elements.size() / 8;
+      constexpr PrimitiveType primitive_type =
+          primitive_util::NativeToPrimitiveType<NativeT>();
+      constexpr int bits_per_element = primitive_util::BitWidth(primitive_type);
+      if constexpr (bits_per_element < 8) {
+        static_assert(!primitive_util::IsFloatingPointType(primitive_type));
+        static_assert(!primitive_util::IsComplexType(primitive_type));
+        static_assert(8 % bits_per_element == 0);
+        constexpr int elements_per_byte = 8 / bits_per_element;
+
+        int64_t bytes = elements.size() / elements_per_byte;
         for (int64_t i = 0; i < bytes; ++i) {
           uint8_t byte = 0;
-          for (int b = 0; b < 8; ++b) {
-            if (elements[i * 8 + b]) {
-              byte |= uint8_t{1} << b;
-            }
+          for (int b = 0; b < elements_per_byte; ++b) {
+            uint8_t src =
+                static_cast<uint8_t>(elements[i * elements_per_byte + b]) &
+                LsbMask<uint8_t>(bits_per_element);
+            byte |= src << (b * bits_per_element);
           }
           WriteElement(byte);
         }
-        int64_t rest = elements.size() % 8;
+        int64_t rest = elements.size() % elements_per_byte;
         if (rest != 0) {
           uint8_t byte = 0;
           for (int64_t b = 0; b < rest; ++b) {
-            if (elements[bytes * 8 + b]) {
-              byte |= uint8_t{1} << b;
-            }
+            uint8_t src =
+                static_cast<uint8_t>(elements[bytes * elements_per_byte + b]) &
+                LsbMask<uint8_t>(bits_per_element);
+            byte |= src << (b * bits_per_element);
           }
           WriteElement(byte);
-        }
-      } else if constexpr (primitive_util::Is4BitType(
-                               primitive_util::NativeToPrimitiveType<
-                                   NativeT>())) {
-        int64_t bytes = elements.size() / 2;
-        for (int64_t i = 0; i < bytes; ++i) {
-          uint8_t low = static_cast<uint8_t>(elements[i * 2]);
-          uint8_t high = static_cast<uint8_t>(elements[i * 2 + 1]);
-          uint8_t byte = (low & uint8_t{0xf}) | (high << 4);
-          WriteElement(byte);
-        }
-        if (elements.size() % 2 != 0) {
-          uint8_t last = static_cast<uint8_t>(elements.back()) & uint8_t{0xf};
-          WriteElement(last);
         }
       } else {
         for (NativeT element : elements) {
@@ -607,8 +634,7 @@ class LiteralBase {
     ABSL_MUST_USE_RESULT bool ReadElement(NativeT& element) {
       constexpr PrimitiveType primitive_type =
           primitive_util::NativeToPrimitiveType<NativeT>();
-      static_assert(!primitive_util::Is4BitType(primitive_type));
-      static_assert(primitive_type != PRED);
+      static_assert(primitive_util::BitWidth(primitive_type) % 8 == 0);
       if constexpr (primitive_util::IsComplexType(primitive_type)) {
         using ComponentT =
             primitive_util::NativeTypeOf<primitive_util::ComplexComponentType(
@@ -653,45 +679,38 @@ class LiteralBase {
 
     template <typename NativeT>
     ABSL_MUST_USE_RESULT bool ReadElements(absl::Span<NativeT> elements) {
-      if constexpr (std::is_same_v<NativeT, bool>) {
-        int64_t bytes = elements.size() / 8;
+      constexpr PrimitiveType primitive_type =
+          primitive_util::NativeToPrimitiveType<NativeT>();
+      constexpr int bits_per_element = primitive_util::BitWidth(primitive_type);
+      if constexpr (bits_per_element < 8) {
+        static_assert(!primitive_util::IsFloatingPointType(primitive_type));
+        static_assert(!primitive_util::IsComplexType(primitive_type));
+        static_assert(8 % bits_per_element == 0);
+        constexpr int elements_per_byte = 8 / bits_per_element;
+
+        int64_t bytes = elements.size() / elements_per_byte;
         for (int64_t i = 0; i < bytes; ++i) {
           uint8_t byte;
           if (!ReadElement(byte)) {
             return false;
           }
-          for (int b = 0; b < 8; ++b) {
-            elements[i * 8 + b] = !!(byte & (uint8_t{1} << b));
+          for (int b = 0; b < elements_per_byte; ++b) {
+            elements[i * elements_per_byte + b] =
+                static_cast<NativeT>(byte & LsbMask<uint8_t>(bits_per_element));
+            byte >>= bits_per_element;
           }
         }
-        int64_t rest = elements.size() % 8;
+        int64_t rest = elements.size() % elements_per_byte;
         if (rest != 0) {
           uint8_t byte;
           if (!ReadElement(byte)) {
             return false;
           }
           for (int64_t b = 0; b < rest; ++b) {
-            elements[bytes * 8 + b] = !!(byte & (uint8_t{1} << b));
+            elements[bytes * elements_per_byte + b] =
+                static_cast<NativeT>(byte & LsbMask<uint8_t>(bits_per_element));
+            byte >>= bits_per_element;
           }
-        }
-      } else if constexpr (primitive_util::Is4BitType(
-                               primitive_util::NativeToPrimitiveType<
-                                   NativeT>())) {
-        int64_t bytes = elements.size() / 2;
-        for (int64_t i = 0; i < bytes; ++i) {
-          uint8_t byte;
-          if (!ReadElement(byte)) {
-            return false;
-          }
-          elements[i * 2] = static_cast<NativeT>(byte & uint8_t{0xf});
-          elements[i * 2 + 1] = static_cast<NativeT>(byte >> 4);
-        }
-        if (elements.size() % 2 != 0) {
-          uint8_t last;
-          if (!ReadElement(last)) {
-            return false;
-          }
-          elements.back() = static_cast<NativeT>(last);
         }
       } else {
         for (NativeT& element : elements) {
@@ -894,16 +913,16 @@ class LiteralBase {
       return ForEachHelper(
                  [&func](const ShapeIndex& index, const Piece& piece) {
                    func(index, piece);
-                   return OkStatus();
+                   return absl::OkStatus();
                  },
                  *this, &index)
           .IgnoreError();
     }
     // Same as above, but the function has the type:
-    //    Status (const ShapeIndex& index, const Piece& piece)
+    //    absl::Status (const ShapeIndex& index, const Piece& piece)
     // The first non-OK return value is returned by the function.
     template <typename Fn>
-    Status ForEachSubpieceWithStatus(const Fn& func) const {
+    absl::Status ForEachSubpieceWithStatus(const Fn& func) const {
       ShapeIndex index;
       return ForEachHelper(func, *this, &index);
     }
@@ -923,16 +942,16 @@ class LiteralBase {
       return ForEachMutableHelper(
                  [&func](const ShapeIndex& index, Piece* piece) {
                    func(index, piece);
-                   return OkStatus();
+                   return absl::OkStatus();
                  },
                  const_cast<xla::LiteralBase::Piece*>(this), &index)
           .IgnoreError();
     }
     // Same as above, but the function has the type:
-    //    Status (const ShapeIndex& index, Piece& piece)
+    //    absl::Status (const ShapeIndex& index, Piece& piece)
     // The first non-OK return value is returned by the function.
     template <typename Fn>
-    Status ForEachMutableSubpieceWithStatus(const Fn& func) {
+    absl::Status ForEachMutableSubpieceWithStatus(const Fn& func) {
       ShapeIndex index;
       return ForEachMutableHelper(
           func, const_cast<xla::LiteralBase::Piece*>(this), &index);
@@ -966,11 +985,11 @@ class LiteralBase {
     // Copy the data from 'src' into this piece's buffer. Shapes of this piece
     // and src must be compatible. If only_dynamic_bound is true, only elements
     // within dynamic bounds will be copied.
-    Status CopyFrom(const Piece& src, bool only_dynamic_bound);
+    absl::Status CopyFrom(const Piece& src, bool only_dynamic_bound);
 
     // Copies the data from the given proto into this piece. The shape of this
     // piece must be equal (not just compatible) to the shape of the proto.
-    Status CopyFromProto(const LiteralProto& proto);
+    absl::Status CopyFromProto(const LiteralProto& proto);
 
     // See comments on ArrayValueState for detailed explanation.
     bool IsDetermined() const;
@@ -1029,8 +1048,8 @@ class LiteralBase {
     // The callable 'func' has the same signature as described above in
     // ForEachSubpiece*.
     template <typename Fn>
-    Status ForEachHelper(const Fn& func, const Piece& piece,
-                         ShapeIndex* index) const {
+    absl::Status ForEachHelper(const Fn& func, const Piece& piece,
+                               ShapeIndex* index) const {
       TF_RETURN_IF_ERROR(func(*index, piece));
       if (auto* tuple_rep = piece.GetTupleRep()) {
         for (int64_t i = 0; i < tuple_rep->children.size(); ++i) {
@@ -1040,7 +1059,7 @@ class LiteralBase {
           index->pop_back();
         }
       }
-      return OkStatus();
+      return absl::OkStatus();
     }
     template <typename Fn>
     bool ForEachHelperBool(const Fn& func, const Piece& piece,
@@ -1060,8 +1079,8 @@ class LiteralBase {
       return true;
     }
     template <typename Fn>
-    Status ForEachMutableHelper(const Fn& func, Piece* piece,
-                                ShapeIndex* index) {
+    absl::Status ForEachMutableHelper(const Fn& func, Piece* piece,
+                                      ShapeIndex* index) {
       TF_RETURN_IF_ERROR(func(*index, piece));
       if (auto* tuple_rep = piece->GetTupleRep()) {
         for (int64_t i = 0; i < tuple_rep->children.size(); ++i) {
@@ -1071,7 +1090,7 @@ class LiteralBase {
           index->pop_back();
         }
       }
-      return OkStatus();
+      return absl::OkStatus();
     }
 
     // Recursive helper for EqualElements.
@@ -1151,10 +1170,10 @@ class MutableLiteralBase : public LiteralBase {
   // at 'dest_shape_index' must be compatible with the subshape of 'src_literal'
   // rooted at 'src_shape_index', but need not be arrays. If only_dynamic_bound
   // is true, only elements within dynamic bounds will be copied.
-  Status CopyFrom(const LiteralSlice& src_literal,
-                  const ShapeIndex& dest_shape_index = {},
-                  const ShapeIndex& src_shape_index = {},
-                  bool only_dynamic_bound = false);
+  absl::Status CopyFrom(const LiteralSlice& src_literal,
+                        const ShapeIndex& dest_shape_index = {},
+                        const ShapeIndex& src_shape_index = {},
+                        bool only_dynamic_bound = false);
 
   // Copies the values from src_literal, starting at src_base shape indexes,
   // to this literal, starting at dest_base, where the copy size in each
@@ -1166,10 +1185,10 @@ class MutableLiteralBase : public LiteralBase {
   // element, then copy_size must be 0 in these dimensions while the
   // corresponding base indices being 0.
   // This literal and 'src_literal' must be arrays.
-  Status CopySliceFrom(const LiteralSlice& src_literal,
-                       absl::Span<const int64_t> src_base,
-                       absl::Span<const int64_t> dest_base,
-                       absl::Span<const int64_t> copy_size);
+  absl::Status CopySliceFrom(const LiteralSlice& src_literal,
+                             absl::Span<const int64_t> src_base,
+                             absl::Span<const int64_t> dest_base,
+                             absl::Span<const int64_t> copy_size);
 
   // Copies one element from src_literal[src_index] to (*this)[dest_index].
   void CopyElementFrom(const LiteralSlice& src_literal,
@@ -1188,11 +1207,13 @@ class MutableLiteralBase : public LiteralBase {
 
   // As Set(), but truncates `value` to the literal element type before storing.
   // This literal must be an array.
-  Status SetIntegralAsS64(absl::Span<const int64_t> multi_index, int64_t value);
+  absl::Status SetIntegralAsS64(absl::Span<const int64_t> multi_index,
+                                int64_t value);
 
   // As Set(), but truncates `value` to the literal element type before storing.
   // This literal must be an array.
-  Status SetFromDouble(absl::Span<const int64_t> multi_index, double value);
+  absl::Status SetFromDouble(absl::Span<const int64_t> multi_index,
+                             double value);
 
   // Populate this literal with the given values. Examples:
   //
@@ -1228,14 +1249,14 @@ class MutableLiteralBase : public LiteralBase {
   //
   // This literal must have a dense layout.
   template <typename NativeT>
-  Status Populate(
+  absl::Status Populate(
       absl::FunctionRef<NativeT(absl::Span<const int64_t>)> generator);
 
   // A parallel version of Populate(). This can be used if the generator is
   // thread-safe and the values for the shape's different elements are
   // independent.
   template <typename NativeT>
-  Status PopulateParallel(
+  absl::Status PopulateParallel(
       absl::FunctionRef<NativeT(absl::Span<const int64_t>, int)> generator);
 
   // Similar to Populate() but takes a populator function that allows caller
@@ -1245,13 +1266,13 @@ class MutableLiteralBase : public LiteralBase {
   // that we can avoid templatizing the method for better code size.
   //
   // This literal must have a dense layout.
-  Status PopulateInplace(
+  absl::Status PopulateInplace(
       absl::FunctionRef<void(void*, absl::Span<const int64_t>)> populator);
 
   // A parallel version of PopulateInplace(). This can be used if the generator
   // is thread-safe and the values for the shape's different elements are
   // independent.
-  Status PopulateInplaceParallel(
+  absl::Status PopulateInplaceParallel(
       absl::FunctionRef<void(void*, absl::Span<const int64_t>, int)> populator);
 
   // Fills this literal with the given value.
@@ -1279,110 +1300,24 @@ class MutableLiteralBase : public LiteralBase {
   // Internal template helper for the Literal::CopySliceFrom(), matching its
   // arguments one by one.
   template <typename NativeT>
-  Status CopySliceFromInternal(const LiteralBase& src_literal,
-                               absl::Span<const int64_t> src_base,
-                               absl::Span<const int64_t> dest_base,
-                               absl::Span<const int64_t> copy_size);
+  absl::Status CopySliceFromInternal(const LiteralBase& src_literal,
+                                     absl::Span<const int64_t> src_base,
+                                     absl::Span<const int64_t> dest_base,
+                                     absl::Span<const int64_t> copy_size);
 
-  // A unique_ptr like class which may or may not have ownership of its pointer.
   // The literal may or may not own the storage of the shape. Creating/copying a
   // shape can incur significant overhead which in many case we'd like to avoid,
   // esp. for small literals.
-  class MaybeOwningShapePtr {
-   public:
-    MaybeOwningShapePtr() = default;
-    explicit MaybeOwningShapePtr(std::unique_ptr<Shape> unique)
-        : ptr_and_owning_bit_(TakeUnique(std::move(unique))) {}
-
-    explicit MaybeOwningShapePtr(const Shape* borrowed)
-        : ptr_and_owning_bit_(Borrow(borrowed)) {}
-
-    ~MaybeOwningShapePtr() { MaybeDeleteOwned(); }
-
-    const Shape* get() const {
-      return reinterpret_cast<const Shape*>(ptr_and_owning_bit_ & kPointerMask);
-    }
-    Shape* get_mutable(bool ensure_owned = false) {
-      const Shape* const_ptr = get();
-      // TODO(b/67651157): Remove this copy on write logic and combine get() and
-      // get_mutable() once we remove mutable_shape_do_not_use().
-      if (const_ptr && !OwnsPtr()) {
-        ptr_and_owning_bit_ = TakeUnique(std::make_unique<Shape>(*const_ptr));
-        const_ptr = get();
-      }
-      DCHECK(OwnsPtr());
-      return const_cast<Shape*>(const_ptr);
-    }
-    const Shape* operator->() const { return get(); }
-    const Shape& operator*() const { return *get(); }
-
-    MaybeOwningShapePtr& operator=(std::unique_ptr<Shape> unique) {
-      MaybeDeleteOwned();
-      ptr_and_owning_bit_ = TakeUnique(std::move(std::move(unique)));
-      return *this;
-    }
-
-    MaybeOwningShapePtr& operator=(const Shape* borrowed) {
-      MaybeDeleteOwned();
-      ptr_and_owning_bit_ = Borrow(borrowed);
-      return *this;
-    }
-
-    MaybeOwningShapePtr& operator=(MaybeOwningShapePtr&& other) {
-      using std::swap;
-      swap(ptr_and_owning_bit_, other.ptr_and_owning_bit_);
-      return *this;
-    }
-
-    MaybeOwningShapePtr(const MaybeOwningShapePtr&) = delete;
-    MaybeOwningShapePtr(MaybeOwningShapePtr&& other)
-        : ptr_and_owning_bit_(other.ptr_and_owning_bit_) {
-      other.ptr_and_owning_bit_ = 0;
-    }
-
-    MaybeOwningShapePtr Clone() const {
-      const Shape* ptr = get();
-      if (ptr && OwnsPtr()) {
-        return MaybeOwningShapePtr(std::make_unique<Shape>(*ptr));
-      }
-      return MaybeOwningShapePtr(ptr);
-    }
-
-   private:
-    enum : uint64_t {
-      kOwningBitMask = 1UL,
-      kPointerMask = ~kOwningBitMask,
-    };
-    static intptr_t TakeUnique(std::unique_ptr<Shape> unique) {
-      Shape* released = unique.release();
-      DCHECK_EQ(reinterpret_cast<intptr_t>(released) & kOwningBitMask, 0);
-      return reinterpret_cast<intptr_t>(released) | kOwningBitMask;
-    }
-
-    static intptr_t Borrow(const Shape* borrowed) {
-      DCHECK_EQ(reinterpret_cast<intptr_t>(borrowed) & kOwningBitMask, 0);
-      return reinterpret_cast<intptr_t>(borrowed);
-    }
-
-    bool OwnsPtr() const { return kOwningBitMask & ptr_and_owning_bit_; }
-
-    void MaybeDeleteOwned() {
-      if (OwnsPtr()) {
-        delete get();
-      }
-    }
-
-    intptr_t ptr_and_owning_bit_ = 0;
-  };
+  using MaybeOwningShapePtr = MaybeOwning<Shape>;
 
   // The parent class borrows this shape.
   MaybeOwningShapePtr shape_;
 
   // Implementation details shared between Populate() and PopulateParallel()
   //  template <typename NativeT, typename FnType>
-  //  Status PopulateInternal(const FnType& generator, bool parallel);
+  //  absl::Status PopulateInternal(const FnType& generator, bool parallel);
   template <typename NativeT>
-  Status PopulateInternal(
+  absl::Status PopulateInternal(
       absl::FunctionRef<NativeT(absl::Span<const int64_t>, int)> generator,
       bool parallel);
   void PopulateInplaceInternal(
@@ -1423,9 +1358,9 @@ class Literal : public MutableLiteralBase {
   // allocated in this literal for the subshape at dest_shape_index is
   // deallocated, and the respective buffers are replaced with those in
   // src_literal. Upon return, src_literal is set to a nil shape (empty tuple).
-  virtual Status MoveFrom(Literal&& src_literal,
-                          const ShapeIndex& dest_shape_index);
-  Status MoveFrom(Literal&& src_literal) {
+  virtual absl::Status MoveFrom(Literal&& src_literal,
+                                const ShapeIndex& dest_shape_index);
+  absl::Status MoveFrom(Literal&& src_literal) {
     return MoveFrom(std::move(src_literal), /*dest_shape_index=*/{});
   }
 
@@ -1492,11 +1427,20 @@ class MutableBorrowingLiteral : public MutableLiteralBase {
   MutableBorrowingLiteral(MutableLiteralBase* literal);
   MutableBorrowingLiteral(MutableBorrowingLiteral literal,
                           const ShapeIndex& view_root);
+
+  // 'src_buf_ptr' is not owned by this class and must outlive the
+  // lifetime of this class. It points to an appropriately sized buffer with
+  // data interpreted as indicated by 'shape'.
+  // This constructor is only used for array shapes.
   MutableBorrowingLiteral(const char* src_buf_ptr, const Shape& shape);
 
-  // Create a literal from a list of buffers and a shape.
-  // Returns a tuple literal if `shape` is a tuple type.
+  // Similar as above, except to be used for constructing non-nested tuples.
   MutableBorrowingLiteral(absl::Span<char*> src_buf_ptrs, const Shape& shape);
+
+  // Similar as above, except to be used for constructing literals with
+  // potentially nested tuples (same shape as `src_buf_ptrs`) with borrowed
+  // buffers for each shape index.
+  explicit MutableBorrowingLiteral(ShapeTree<char*> src_buf_ptrs);
 
  private:
   const Piece& root_piece() const override { return *root_piece_; };
@@ -1533,19 +1477,20 @@ class BorrowingLiteral : public LiteralBase {
 
   // 'src_buf_ptr' is not owned by this class and must outlive the
   // lifetime of this class. It points to an appropriately sized buffer with
-  // data interpretered as indicated by 'shape'.
+  // data interpreted as indicated by 'shape'.
   // This constructor is only used for array shapes.
   BorrowingLiteral(const char* src_buf_ptr, const Shape& shape);
+
   // Similar as above, except to be used for constructing non-nested tuples.
   BorrowingLiteral(absl::Span<const char* const> src_buf_ptrs,
                    const Shape& shape);
-  // TODO(b/79707221): adding constructors for nested tuples as well.
+
+  // Similar as above, except to be used for constructing literals with
+  // potentially nested tuples (same shape as `src_buf_ptrs`) with borrowed
+  // buffers for each shape index.
+  explicit BorrowingLiteral(ShapeTree<const char*> src_buf_ptrs);
 
  private:
-  // Recursively builds the subtree for the given piece and sets the subshapes
-  // of the given piece with the given shape.
-  void BuildPieceSubtree(const Shape& shape, Piece* piece);
-
   // Accessor for the root piece of this literal.
   const Piece& root_piece() const override { return root_piece_; };
   Piece root_piece_;
@@ -1603,14 +1548,14 @@ bool LiteralBase::Piece::DeserializeData(
 //   byte (PRED, S4, U4) are packed into bytes.  Otherwise, they are written in
 //   little-endian byte order.
 template <typename OutputIterator>
-Status LiteralBase::SerializeWithShapeProto(const ShapeProto& shape_proto,
-                                            OutputIterator output) const {
+absl::Status LiteralBase::SerializeWithShapeProto(const ShapeProto& shape_proto,
+                                                  OutputIterator output) const {
   SerializeState<OutputIterator> state(shape_proto, output);
   TF_RETURN_IF_ERROR(root_piece().ForEachSubpieceWithStatus(
       [&](const ShapeIndex& shape_index, const Piece& piece) -> absl::Status {
         const Shape& subshape = piece.subshape();
         if (subshape.IsTuple()) {
-          return OkStatus();
+          return absl::OkStatus();
         }
         if (!subshape.IsArray()) {
           return InvalidArgument("Shape cannot be serialized: %s",
@@ -1622,11 +1567,11 @@ Status LiteralBase::SerializeWithShapeProto(const ShapeProto& shape_proto,
               piece.SerializeData<NativeT>(state);
             },
             subshape.element_type());
-        return OkStatus();
+        return absl::OkStatus();
       }));
   DCHECK_EQ(state.num_written(), SerializedSize().value())
       << shape().ToString();
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 template <typename InputIterator>
@@ -1644,7 +1589,7 @@ absl::StatusOr<Literal> Literal::Deserialize(InputIterator begin,
           [&](const ShapeIndex& shape_index, Piece* piece) -> absl::Status {
             const Shape& subshape = piece->subshape();
             if (subshape.IsTuple()) {
-              return OkStatus();
+              return absl::OkStatus();
             }
             if (!subshape.IsArray()) {
               return InvalidArgument("Shape cannot be deserialized: %s",
@@ -1661,7 +1606,7 @@ absl::StatusOr<Literal> Literal::Deserialize(InputIterator begin,
                   "Failed to deserialize all data for shape: %s",
                   shape.ToString());
             }
-            return OkStatus();
+            return absl::OkStatus();
           }));
   DCHECK_EQ(state.num_read(), ShapeUtil::SerializedSize(shape).value())
       << shape.ToString();
@@ -1923,7 +1868,7 @@ void MutableLiteralBase::PopulateR4FromArray4D(const Array4D<NativeT>& values) {
 }
 
 template <typename NativeT>
-TF_ATTRIBUTE_NOINLINE Status MutableLiteralBase::PopulateInternal(
+TF_ATTRIBUTE_NOINLINE absl::Status MutableLiteralBase::PopulateInternal(
     absl::FunctionRef<NativeT(absl::Span<const int64_t>, int)> generator,
     bool parallel) {
   const Shape& this_shape = shape();
@@ -1940,11 +1885,11 @@ TF_ATTRIBUTE_NOINLINE Status MutableLiteralBase::PopulateInternal(
         *static_cast<NativeT*>(dest) = generator(indices, thread_id);
       },
       parallel);
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 template <typename NativeT>
-TF_ATTRIBUTE_NOINLINE Status MutableLiteralBase::Populate(
+TF_ATTRIBUTE_NOINLINE absl::Status MutableLiteralBase::Populate(
     absl::FunctionRef<NativeT(absl::Span<const int64_t>)> generator) {
   TF_RET_CHECK(LayoutUtil::IsDenseArray(shape()))
       << __func__ << " is only supported for dense arrays: " << shape();
@@ -1955,7 +1900,7 @@ TF_ATTRIBUTE_NOINLINE Status MutableLiteralBase::Populate(
       /*parallel=*/false);
 }
 template <typename NativeT>
-TF_ATTRIBUTE_NOINLINE Status MutableLiteralBase::PopulateParallel(
+TF_ATTRIBUTE_NOINLINE absl::Status MutableLiteralBase::PopulateParallel(
     absl::FunctionRef<NativeT(absl::Span<const int64_t>, int)> generator) {
   TF_RET_CHECK(LayoutUtil::IsDenseArray(shape()))
       << __func__ << " is only supported for dense arrays: " << shape();

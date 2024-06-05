@@ -26,9 +26,11 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "xla/stream_executor/event.h"
 #include "xla/stream_executor/executor_cache.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream_executor_interface.h"
+#include "xla/stream_executor/stream_interface.h"
 #include "xla/stream_executor/tpu/c_api_decl.h"
 #include "xla/stream_executor/tpu/tpu_executor_c_api.h"  // IWYU pragma: keep
 #include "xla/stream_executor/tpu/tpu_platform_interface.h"
@@ -46,9 +48,6 @@ class TpuPlatform : public ::tensorflow::tpu::TpuPlatformInterface {
       absl::flat_hash_map<stream_executor::EventInterface*, SE_Event*>;
 
   static const ::stream_executor::Platform::Id kId;
-
-  template <typename T>
-  using StatusOr = ::absl::StatusOr<T>;
 
   TpuPlatform();
 
@@ -80,22 +79,22 @@ class TpuPlatform : public ::tensorflow::tpu::TpuPlatformInterface {
     LOG(FATAL) << "Not yet implemented";
   }
 
-  StatusOr<std::unique_ptr<::stream_executor::DeviceDescription>>
+  absl::StatusOr<std::unique_ptr<::stream_executor::DeviceDescription>>
   DescriptionForDevice(int ordinal) const override {
     LOG(FATAL) << "Not yet implemented";
   }
 
-  StatusOr<::stream_executor::StreamExecutor*> ExecutorForDevice(
+  absl::StatusOr<::stream_executor::StreamExecutor*> ExecutorForDevice(
       int ordinal) override {
     stream_executor::StreamExecutorConfig config;
     config.ordinal = ordinal;
     return GetExecutor(config);
   }
 
-  StatusOr<::stream_executor::StreamExecutor*> GetExecutor(
+  absl::StatusOr<::stream_executor::StreamExecutor*> GetExecutor(
       const ::stream_executor::StreamExecutorConfig& config) override;
 
-  StatusOr<std::unique_ptr<::stream_executor::StreamExecutor>>
+  absl::StatusOr<std::unique_ptr<::stream_executor::StreamExecutor>>
   GetUncachedExecutor(
       const ::stream_executor::StreamExecutorConfig& config) override;
 

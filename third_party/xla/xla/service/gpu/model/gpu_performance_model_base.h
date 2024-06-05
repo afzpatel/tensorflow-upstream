@@ -20,6 +20,7 @@ limitations under the License.
 #include <optional>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/strings/str_format.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -41,6 +42,22 @@ struct EstimateRunTimeData {
   absl::Duration write_time;
   absl::Duration compute_time;
   absl::Duration exec_time;
+
+  std::string ToString() const {
+    return absl::StrFormat(
+        "EstimateRunTimeData{\n"
+        " flops: %d\n"
+        " bytes_written: %d\n"
+        " num_threads: %d\n"
+        " read_time: %s\n"
+        " write_time: %s\n"
+        " compute_time: %s\n"
+        " exec_time: %s\n"
+        "}",
+        flops, bytes_written, num_threads, absl::FormatDuration(read_time),
+        absl::FormatDuration(write_time), absl::FormatDuration(compute_time),
+        absl::FormatDuration(exec_time));
+  }
 };
 
 class GpuPerformanceModelCache {
@@ -66,13 +83,13 @@ class GpuPerformanceModelCache {
   absl::Mutex mutex_;
 
   // Stores unfused runtime data for individual instructions.
-  absl::flat_hash_map<HloInstructionAdaptor, EstimateRunTimeData>
+  absl::flat_hash_map<const HloInstruction*, EstimateRunTimeData>
       instruction_runtime_data_;
 
   // Stores fused runtime data for producer-consumer pairs.
   absl::flat_hash_map<
-      HloInstructionAdaptor,
-      absl::flat_hash_map<HloInstructionAdaptor, absl::Duration>>
+      const HloInstruction*,
+      absl::flat_hash_map<const HloInstruction*, absl::Duration>>
       fusion_runtime_data_;
 };
 
@@ -127,12 +144,6 @@ class GpuPerformanceModelBase {
       absl::Microseconds(5);
   static constexpr float kL2CacheSpeedup = 2.5;
   static constexpr float kL1CacheSpeedup = 8;
-  // A very conservative estimate. L1 size varies because it can be dynamically
-  // configured as shared memory; there is no easy way to query its actual size;
-  // also we do not count what occupies cache, but rather claim that what is
-  // much smaller than the cache size will likely stay in it.
-  // For reference, it can be up to 256 kB per SM on RTX A6000.
-  static constexpr float kL1CacheSizePerSM = 2 * 1024;
 
   // Uses HloFusionAnalysis for computing the actual number of threads and
   // blocks that the IR emitter will use.

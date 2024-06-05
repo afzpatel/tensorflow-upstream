@@ -25,7 +25,7 @@ limitations under the License.
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/client.h"
 #include "xla/python/ifrt/future.h"
-#include "tsl/concurrency/ref_count.h"
+#include "xla/tsl/concurrency/ref_count.h"
 
 namespace xla {
 namespace ifrt {
@@ -81,7 +81,7 @@ std::string PjRtTuple::DebugString() const {
 }
 int PjRtTuple::Arity() { return values_.size(); }
 
-Status PjRtTuple::Unpack(absl::Span<tsl::RCReference<Value>> values_out) {
+absl::Status PjRtTuple::Unpack(absl::Span<tsl::RCReference<Value>> values_out) {
   if (values_out.size() != values_.size()) {
     return InvalidArgument(
         "Wrong number of output values for "

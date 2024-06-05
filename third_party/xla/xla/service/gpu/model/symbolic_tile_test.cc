@@ -15,12 +15,22 @@ limitations under the License.
 
 #include "xla/service/gpu/model/symbolic_tile.h"
 
+#include <cstdint>
 #include <optional>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/log/check.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Casting.h"
+#include "mlir/IR/AffineExpr.h"  // from @llvm-project
+#include "mlir/IR/AffineMap.h"  // from @llvm-project
 #include "xla/service/gpu/model/affine_map_printer.h"
 #include "xla/service/gpu/model/indexing_analysis.h"
 #include "xla/service/gpu/model/indexing_test_utils.h"
@@ -30,17 +40,22 @@ namespace xla {
 namespace gpu {
 namespace {
 
+using ::llvm::SmallVector;
+using ::mlir::AffineExpr;
+using ::mlir::AffineMap;
+using ::testing::ElementsAre;
 using ::testing::ExplainMatchResult;
 using ::testing::Optional;
 using ::testing::StrEq;
 
-MATCHER_P3(MatchSymbolicTile, offset_map_string, size_map_string,
-           stride_map_string,
+MATCHER_P4(MatchSymbolicTileWithRtVars, offset_map_string, size_map_string,
+           stride_map_string, rt_vars_string,
            absl::StrCat(negation
                             ? "equals "
                             : "doesn't equal symbolic tile with offset_map_ ",
                         offset_map_string, " and size_map_ ", size_map_string,
-                        " and stride_map_ ", stride_map_string)) {
+                        " and stride_map_ ", stride_map_string, "and rt_vars_ ",
+                        rt_vars_string)) {
   AffineMapPrinter printer;
   return ExplainMatchResult(StrEq(offset_map_string),
                             printer.ToString(arg.offset_map()),
@@ -50,7 +65,47 @@ MATCHER_P3(MatchSymbolicTile, offset_map_string, size_map_string,
                             result_listener) &&
          ExplainMatchResult(StrEq(stride_map_string),
                             printer.ToString(arg.stride_map()),
+                            result_listener) &&
+         // Strip whitespace, so we don't need to add trailing newlines.
+         ExplainMatchResult(StrEq(absl::StripAsciiWhitespace(rt_vars_string)),
+                            absl::StripAsciiWhitespace(arg.RtVarsToString()),
                             result_listener);
+}
+
+MATCHER_P3(MatchSymbolicTile, offset_map_string, size_map_string,
+           stride_map_string,
+           absl::StrCat(negation
+                            ? "equals "
+                            : "doesn't equal symbolic tile with offset_map_ ",
+                        offset_map_string, " and size_map_ ", size_map_string,
+                        " and stride_map_ ", stride_map_string)) {
+  return ExplainMatchResult(
+      MatchSymbolicTileWithRtVars(offset_map_string, size_map_string,
+                                  stride_map_string, ""),
+      arg, result_listener);
+}
+
+std::vector<int64_t> EvaluateMapAt(AffineMap affine_map,
+                                   absl::Span<int64_t const> parameters) {
+  CHECK_EQ(affine_map.getNumSymbols(), parameters.size());
+  CHECK_EQ(affine_map.getNumDims(), 0);
+
+  SmallVector<AffineExpr> symbol_replacements = llvm::to_vector(
+      llvm::map_range(parameters, [affine_map](const int64_t v) -> AffineExpr {
+        return mlir::getAffineConstantExpr(v, affine_map.getContext());
+      }));
+
+  AffineMap simplified_affine_map =
+      mlir::simplifyAffineMap(affine_map.replaceDimsAndSymbols(
+          /*dimReplacements=*/{}, symbol_replacements, /*numResultDims=*/0,
+          /*numResultSyms=*/0));
+
+  SmallVector<int64_t> results = llvm::to_vector(llvm::map_range(
+      simplified_affine_map.getResults(), [](AffineExpr result) -> int64_t {
+        return llvm::cast<mlir::AffineConstantExpr>(result).getValue();
+      }));
+
+  return std::vector<int64_t>(results.begin(), results.end());
 }
 
 using SymbolicTileTest = IndexingTestBase;
@@ -113,6 +168,58 @@ TEST_F(SymbolicTileTest,
           "()[s0, s1] -> "
           "(1, (s0 + 5) floordiv 6, s0 - ((s0 - 1) floordiv 6) * 6, s1)",
           "()[s0, s1] -> (0, 1, 1, 1)")));
+}
+
+TEST_F(SymbolicTileTest,
+       CanPropagateTileThroughNonTrivialSplitReshapeFromOutputToInput) {
+  auto input_indexing = GetOutputToInputIndexing(ParseAndGetRoot(R"(
+    HloModule m
+    ENTRY e {
+      p0 = f32[192,4]{1,0} parameter(0)
+      ROOT bitcast = s8[4,8,6,4]{3,2,1,0} bitcast(p0)
+    }
+  )"));
+
+  std::optional<SymbolicTile> symbolic_tile =
+      SymbolicTile::FromIndexingMap(*input_indexing.indexing_maps[0].begin());
+
+  EXPECT_THAT(
+      symbolic_tile,
+      Optional(MatchSymbolicTile(
+          "()[s0, s1, s2, s3] -> (0, 0)",
+          "()[s0, s1, s2, s3] -> ((s0 * s1) * s2, s3)",
+          // Collapsed dimensions force us to create nested conditionals, since
+          // the stride of the output corresponds to the stride of the minormost
+          // expression along which elements are captured in the composite
+          // expression. Hence, the resulting expression is very ugly.
+          "()[s0, s1, s2, s3] -> "
+          "(((-s2 + 7) floordiv 6) * (((-s1 + 9) floordiv 8) * "
+          "((-((-s0 + 5) floordiv 4) + 1) * 48) + "
+          "(-((-s1 + 9) floordiv 8) + 1) * 6) + -((-s2 + 7) floordiv 6) + 1, "
+          "1)")));
+
+  // Capturing elements along dimensions 0, 1, and 2 makes the stride equal to
+  // 1.
+  EXPECT_THAT(EvaluateMapAt(symbolic_tile->stride_map(), {4, 8, 6, 4}),
+              ElementsAre(1, 1));
+  // Capturing elements along dimension 2 makes the stride equal to 1.
+  EXPECT_THAT(EvaluateMapAt(symbolic_tile->stride_map(), {1, 1, 6, 4}),
+              ElementsAre(1, 1));
+  // Capturing elements only along dimension 1 makes the stride equal to
+  // the length of dimension 2 (6).
+  EXPECT_THAT(EvaluateMapAt(symbolic_tile->stride_map(), {1, 8, 1, 4}),
+              ElementsAre(6, 1));
+  // Capturing elements only along dimension 0 makes the stride equal to the
+  // product of the lengths of dimensions 1 and 2 (8 * 6).
+  EXPECT_THAT(EvaluateMapAt(symbolic_tile->stride_map(), {2, 1, 1, 4}),
+              ElementsAre(48, 1));
+  // Capturing elements along dimension 0 and dimension 1 makes the stride
+  // equal to the length of dimension 2 (6).
+  EXPECT_THAT(EvaluateMapAt(symbolic_tile->stride_map(), {2, 8, 1, 4}),
+              ElementsAre(6, 1));
+  // Capturing a single element in the collapsed dimensions makes the stride 0.
+  EXPECT_THAT(EvaluateMapAt(symbolic_tile->stride_map(), {1, 1, 1, 4}),
+              ElementsAre(0, 1));
 }
 
 TEST_F(SymbolicTileTest, FailsToPropagateTileThroughNonTrivialReshape) {
@@ -274,6 +381,133 @@ TEST_F(SymbolicTileTest, CanPropagateTileThroughPadOpWithoutInteriorPadding) {
       Optional(MatchSymbolicTile("()[s0, s1] -> (-2, -1)",
                                  "()[s0, s1] -> (s0, s1)",
                                  "()[s0, s1] -> (1, 1)")));
+}
+
+TEST_F(SymbolicTileTest, CanPropagateTileThroughDynamicSlice) {
+  auto input_indexing = GetOutputToInputIndexing(ParseAndGetRoot(R"(
+    HloModule m
+    ENTRY e {
+      %src = s32[2,2,258] parameter(0)
+      %of1 = s32[] parameter(1)
+      %of2 = s32[] parameter(2)
+      %of3 = s32[] parameter(3)
+      ROOT %ds = s32[1,2,32] dynamic-slice(s32[2,2,258] %src,
+        s32[] %of1, s32[] %of2, s32[] %of3),
+        dynamic_slice_sizes={1, 2, 32}
+    }
+  )"));
+
+  ASSERT_EQ(input_indexing.indexing_maps.size(), 4);
+
+  EXPECT_THAT(
+      SymbolicTile::FromIndexingMap(*input_indexing.indexing_maps[0].begin()),
+      // s0, s1, s2: tile sizes
+      // s3, s4: runtime parameters
+      // Note: We don't have s0 in the size map's rhs, because the first dim
+      // of the tile size can only be 1. The second offset is optimized to 0,
+      // because that is the only possible value.
+      Optional(MatchSymbolicTileWithRtVars(
+          "()[s0, s1, s2, s3, s4] -> (s3, 0, s4)",
+          "()[s0, s1, s2] -> (1, s1, s2)", "()[s0, s1, s2] -> (0, 1, 1)",
+          R"(
+s3 in [0, 1]
+  hlo: %of1 = s32[] parameter(1)
+  (d0, d1, d2) -> ()
+s4 in [0, 226]
+  hlo: %of3 = s32[] parameter(3)
+  (d0, d1, d2) -> ()
+)")));
+
+  for (int i = 1; i <= 3; i++) {
+    EXPECT_THAT(
+        SymbolicTile::FromIndexingMap(*input_indexing.indexing_maps[i].begin()),
+        Optional(MatchSymbolicTile("()[s0, s1, s2] -> ()",
+                                   "()[s0, s1, s2] -> ()",
+                                   "()[s0, s1, s2] -> ()")));
+  }
+}
+
+TEST_F(SymbolicTileTest, CanPropagateTileThroughDynamicUpdateSlice) {
+  auto input_indexing = GetOutputToInputIndexing(ParseAndGetRoot(R"(
+    HloModule m
+    ENTRY e {
+      %src = s32[20,30] parameter(0)
+      %upd = s32[5,10] parameter(1)
+      %of1 = s32[] parameter(2)
+      %of2 = s32[] parameter(3)
+      ROOT %dus = s32[20,30] dynamic-update-slice(
+          s32[20,30] %src, s32[5,10] %upd, s32[] %of1, s32[] %of2)
+    }
+  )"));
+
+  ASSERT_EQ(input_indexing.indexing_maps.size(), 4);
+
+  EXPECT_THAT(
+      SymbolicTile::FromIndexingMap(*input_indexing.indexing_maps[0].begin()),
+      // s0, s1: tile sizes
+      // s2, s3: runtime parameters
+      Optional(MatchSymbolicTile("()[s0, s1] -> (0, 0)",
+                                 "()[s0, s1] -> (s0, s1)",
+                                 "()[s0, s1] -> (1, 1)")));
+  EXPECT_THAT(
+      SymbolicTile::FromIndexingMap(*input_indexing.indexing_maps[1].begin()),
+      // s0, s1: tile sizes
+      // s2, s3: runtime parameters
+      Optional(MatchSymbolicTileWithRtVars("()[s0, s1, s2, s3] -> (-s2, -s3)",
+                                           "()[s0, s1] -> (s0, s1)",
+                                           "()[s0, s1] -> (1, 1)",
+                                           R"(
+s2 in [0, 15]
+  hlo: %of1 = s32[] parameter(2)
+  (d0, d1) -> ()
+s3 in [0, 20]
+  hlo: %of2 = s32[] parameter(3)
+  (d0, d1) -> ()
+)")));
+  for (int i = 2; i <= 3; i++) {
+    EXPECT_THAT(
+        SymbolicTile::FromIndexingMap(*input_indexing.indexing_maps[i].begin()),
+        Optional(MatchSymbolicTile("()[s0, s1] -> ()", "()[s0, s1] -> ()",
+                                   "()[s0, s1] -> ()")));
+  }
+}
+
+TEST_F(SymbolicTileTest, CanPropagateTileThroughGather) {
+  auto input_indexing = GetOutputToInputIndexing(ParseAndGetRoot(R"(
+    HloModule m
+    ENTRY main {
+      operand = f32[33,76,70] parameter(0)
+      indices = s32[1806,2] parameter(1)
+      ROOT r = f32[1806,7,8,4] gather(operand, indices), offset_dims={1,2,3},
+                                 collapsed_slice_dims={}, start_index_map={0,1},
+                                 index_vector_dim=1, slice_sizes={7,8,4}
+    }
+  )"));
+
+  ASSERT_EQ(input_indexing.indexing_maps.size(), 2);
+
+  EXPECT_THAT(
+      SymbolicTile::FromIndexingMap(*input_indexing.indexing_maps[0].begin()),
+      // s0, s1, s2, s3: tile sizes
+      // s4, s5: runtime parameters
+      Optional(MatchSymbolicTileWithRtVars(
+          "()[s0, s1, s2, s3, s4, s5] -> (s4, s5, 0)",
+          "()[s0, s1, s2, s3] -> (s1, s2, s3)",
+          "()[s0, s1, s2, s3] -> (1, 1, 1)",
+          R"(
+s4 in [0, 26]
+  hlo: %indices = s32[1806,2]{1,0} parameter(1)
+  (d0, d1, d2, d3) -> (d0, 0)
+s5 in [0, 68]
+  hlo: %indices = s32[1806,2]{1,0} parameter(1)
+  (d0, d1, d2, d3) -> (d0, 1)
+)")));
+
+  EXPECT_THAT(
+      SymbolicTile::FromIndexingMap(*input_indexing.indexing_maps[1].begin()),
+      Optional(MatchSymbolicTile("()[s0, s1, s2, s3] -> (0, 0)",
+                                 "()[s0, s1, s2, s3] -> (s0, 2)",
+                                 "()[s0, s1, s2, s3] -> (1, 1)")));
 }
 
 TEST_F(SymbolicTileTest, CanPropagateTileThroughSplitReshapeOfReverse) {

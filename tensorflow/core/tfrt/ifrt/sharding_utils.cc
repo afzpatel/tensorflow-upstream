@@ -45,16 +45,15 @@ limitations under the License.
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
 #include "xla/python/pjrt_ifrt/xla_sharding.h"
+#include "xla/tsl/concurrency/ref_count.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/status.h"
-#include "tensorflow/core/platform/statusor.h"
 #include "tensorflow/core/tfrt/ifrt/ifrt_tensor_utils.h"
 #include "tensorflow/core/tpu/kernels/sharding_utils.h"
-#include "tsl/concurrency/ref_count.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
 #include "tsl/platform/threadpool.h"
@@ -174,8 +173,8 @@ SplitAndCreateArraysFromHostBuffer(
                   kImmutableUntilTransferCompletes,
               [tensor, slice_idx]() {
                 // Keep tensor alive
-                LOG(INFO) << "Done with host buffer for slice " << slice_idx
-                          << " at " << tensor.data();
+                VLOG(2) << "Done with host buffer for slice " << slice_idx
+                        << " at " << tensor.data();
               }));
       arrays.push_back(std::move(array));
       device_iter++;

@@ -46,7 +46,6 @@ limitations under the License.
 #include "xla/shape_layout.h"
 #include "xla/shape_tree.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/status_macros.h"
 #include "xla/statusor.h"
 #include "xla/stream_executor/device_memory.h"
@@ -166,7 +165,7 @@ absl::Status UpdateDynamicInputs(
   TF_RET_CHECK(runtime_inputs->size() == compile_time_shapes.size());
   TF_ASSIGN_OR_RETURN(
       auto transfer_manager,
-      xla::TransferManager::GetForPlatform(stream->parent()->platform()));
+      xla::TransferManager::GetForPlatform(stream->parent()->GetPlatform()));
   for (int64_t i = 0; i < compile_time_shapes.size(); i++) {
     // TODO(yunxing): Iterating over thousands of elements can be slow. One way
     // to optimize for fast path without dynamic shapes is add a field in

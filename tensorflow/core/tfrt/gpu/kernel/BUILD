@@ -66,6 +66,7 @@ cc_library(
         "@local_tsl//tsl/framework:serving_device_selector",
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:fingerprint",
+        "@local_tsl//tsl/platform:protobuf",
         "@local_tsl//tsl/platform:statusor",
         "@local_xla//xla/pjrt:pjrt_client",
         "@tf_runtime//:hostcontext",
@@ -78,9 +79,12 @@ tf_cuda_cc_test(
     name = "gpu_runner_test",
     srcs = ["gpu_runner_test.cc"],
     tags = [
-        "config-cuda-only",
+        "gpu",  # Only enables test on GPU.
         "no_oss",  # This test only runs with GPU.
-        "requires-gpu-nvidia",
+        "noasan",
+        "nomsan",
+        "noopt",
+        "notsan",
     ],
     deps = [
         ":gpu_runner",
@@ -101,6 +105,7 @@ tf_cuda_cc_test(
         "//tensorflow/core/tfrt/common:pjrt_util",
         "//tensorflow/core/tfrt/fallback:fallback_state",
         "@com_google_googletest//:gtest_main",
+        "@local_tsl//tsl/framework:serving_device_selector_policies",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:tensor",
     ],

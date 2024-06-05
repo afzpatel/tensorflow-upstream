@@ -29,6 +29,7 @@ cc_library(
         "//xla/service:hlo_proto_cc",
         "//xla/stream_executor:dnn",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
     ],
 )
 
@@ -42,6 +43,7 @@ cc_library(
         "//xla:xla_data_proto_cc",
         "//xla/client:xla_builder",
         "//xla/hlo/ir:hlo",
+        "@com_google_absl//absl/status",
     ],
 )
 

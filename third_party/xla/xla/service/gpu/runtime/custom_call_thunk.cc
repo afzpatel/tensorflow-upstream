@@ -150,12 +150,13 @@ absl::Status CustomCallThunk::ExecuteFfiHandler(const ExecuteParams& params) {
   builder.AddAttributes(attrs.Build());
   CallFrame call_frame = builder.Build();
 
-  // TODO(ezhulenev): Remove `ServiceExecutableRunOptions` from FFI handler
+  // TODO(b/340104720): Remove `ServiceExecutableRunOptions` from FFI handler
   // execution context, as apparently it's not easily accessible from Thunk.
   ExecutableRunOptions run_options;
   run_options.set_stream(params.stream);
   run_options.set_allocator(params.buffer_allocations->memory_allocator());
   run_options.set_device_ordinal(params.buffer_allocations->device_ordinal());
+  run_options.set_ffi_execution_context(params.ffi_execution_context);
   ServiceExecutableRunOptions service_run_options(run_options);
 
   CallOptions options = {&service_run_options, called_computation_};
@@ -164,69 +165,6 @@ absl::Status CustomCallThunk::ExecuteFfiHandler(const ExecuteParams& params) {
 
 absl::Status CustomCallThunk::ExecuteOnStream(const ExecuteParams& params) {
   return handler_ ? ExecuteFfiHandler(params) : ExecuteCustomCall(params);
-}
-
-absl::StatusOr<CustomCallThunk::AttributesMap> BuildAttributesMap(
-    mlir::DictionaryAttr dict) {
-  CustomCallThunk::AttributesMap attributes;
-  for (auto& kv : dict) {
-    std::string_view name = kv.getName().strref();
-
-    auto integer = [&](mlir::IntegerAttr integer) {
-      switch (integer.getType().getIntOrFloatBitWidth()) {
-        case 32:
-          attributes[name] = static_cast<int32_t>(integer.getInt());
-          return absl::OkStatus();
-        case 64:
-          attributes[name] = static_cast<int64_t>(integer.getInt());
-          return absl::OkStatus();
-        default:
-          return absl::InvalidArgumentError(absl::StrCat(
-              "Unsupported integer attribute bit width for attribute: ", name));
-      }
-    };
-
-    auto fp = [&](mlir::FloatAttr fp) {
-      switch (fp.getType().getIntOrFloatBitWidth()) {
-        case 32:
-          attributes[name] = static_cast<float>(fp.getValue().convertToFloat());
-          return absl::OkStatus();
-        default:
-          return absl::InvalidArgumentError(absl::StrCat(
-              "Unsupported float attribute bit width for attribute: ", name));
-      }
-    };
-
-    auto arr = [&](mlir::DenseArrayAttr arr) {
-      if (auto dense = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(arr)) {
-        attributes[name] = dense.asArrayRef().vec();
-        return absl::OkStatus();
-      } else if (auto dense = mlir::dyn_cast<mlir::DenseI64ArrayAttr>(arr)) {
-        attributes[name] = dense.asArrayRef().vec();
-        return absl::OkStatus();
-      }
-
-      return absl::InvalidArgumentError(
-          absl::StrCat("Unsupported array element type for attribute: ", name));
-    };
-
-    auto str = [&](mlir::StringAttr str) {
-      attributes[name] = str.getValue().str();
-      return absl::OkStatus();
-    };
-
-    TF_RETURN_IF_ERROR(
-        llvm::TypeSwitch<mlir::Attribute, Status>(kv.getValue())
-            .Case<mlir::IntegerAttr>(integer)
-            .Case<mlir::FloatAttr>(fp)
-            .Case<mlir::DenseArrayAttr>(arr)
-            .Case<mlir::StringAttr>(str)
-            .Default([&](mlir::Attribute) {
-              return absl::InvalidArgumentError(absl::StrCat(
-                  "Unsupported attribute type for attribute: ", name));
-            }));
-  }
-  return attributes;
 }
 
 }  // namespace gpu

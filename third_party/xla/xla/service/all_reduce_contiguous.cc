@@ -28,7 +28,8 @@ limitations under the License.
 namespace xla {
 namespace {
 
-Status ReplaceWithContiguousAllReduce(HloAllReduceInstruction* all_reduce) {
+absl::Status ReplaceWithContiguousAllReduce(
+    HloAllReduceInstruction* all_reduce) {
   TF_RET_CHECK(all_reduce);
   TF_RET_CHECK(!all_reduce->has_sharding());
 
@@ -56,7 +57,7 @@ Status ReplaceWithContiguousAllReduce(HloAllReduceInstruction* all_reduce) {
   HloInstruction* new_all_reduce =
       computation.AddInstruction(HloInstruction::CreateAllReduce(
           concat_shape, {concatenated}, all_reduce->to_apply(),
-          all_reduce->replica_groups(),
+          all_reduce->device_list(),
           /*constrain_layout=*/false, all_reduce->channel_id(),
           all_reduce->use_global_device_ids()));
 

@@ -31,6 +31,7 @@
       been added to TF binary distributions (Python wheels).
 * Replace `DebuggerOptions` of TensorFlow Quantizer, and migrate to
   `DebuggerConfig` of StableHLO Quantizer.
+* Add TensorFlow to StableHLO converter to TensorFlow pip package.
 
 ## Keras
 
@@ -87,6 +88,8 @@
     * The Python TF Lite Interpreter bindings now have an option
       `experimental_default_delegate_latest_features` to enable all default
       delegate features.
+    * Flatbuffer version update:
+        * `GetTemporaryPointer()` bug fixed.
 
 * `tf.data`
     * Add `wait` to `tf.data.Dataset.load`. If `True`, for snapshots written
@@ -94,6 +97,13 @@
       For snapshots written with regular `save`, it waits for the snapshot until
       it's finished. The default is `False` for backward compatibility. Users of
       `distributed_save` are recommended to set it to `True`.
+
+* `tf.tpu.experimental.embedding.TPUEmbeddingV2`
+    * Add `compute_sparse_core_stats` for sparse core users to profile the 
+      data with this API to get the `max_ids` and `max_unique_ids`. These
+      numbers will be needed to configure the sparse core embedding mid level 
+      api.
+    * Remove the `preprocess_features` method since that's no longer needed.
 
 ## Thanks to our Contributors
 

@@ -33,6 +33,8 @@ limitations under the License.
 #include "mlir/AsmParser/AsmParser.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
+#include "mlir/Support/LLVM.h"  // from @llvm-project
+#include "xla/ffi/attribute_map.h"
 #include "xla/ffi/ffi_api.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -109,9 +111,11 @@ absl::StatusOr<BufferAllocation::Slice> GetOperandSlice(
                               /*index*/ {});
   }
 
-  auto slice_adaptor =
-      HloFindIf({HloInstructionAdaptor(*start)}, adaptor, [](auto node) {
-        return IsOpcodeAnyOf<HloOpcode::kDynamicSlice, HloOpcode::kSlice>(node);
+  auto slice_adaptor = HloFindIf(
+      {HloInstructionAdaptor(*start, &adaptor)}, adaptor,
+      [](HloInstructionAdaptor node) {
+        return IsOpcodeAnyOf<HloOpcode::kDynamicSlice, HloOpcode::kSlice>(
+            &node.instruction());
       });
   if (slice_adaptor.has_value()) {
     auto* slice_instr =
@@ -224,7 +228,7 @@ absl::StatusOr<BufferAllocation::Slice> GetResultSlice(
   }
 
   auto slice_adaptor = HloFindIf(
-      {HloInstructionAdaptor(*start)}, adaptor,
+      {HloInstructionAdaptor(*start, &adaptor)}, adaptor,
       [](auto node) { return node.opcode() == HloOpcode::kDynamicUpdateSlice; },
       /*visit_operands=*/false);
   if (slice_adaptor.has_value()) {
@@ -331,7 +335,8 @@ absl::StatusOr<FusionEmissionResult> EmitGemm(
   }
 
   bool deterministic_ops =
-      ir_emitter_context.debug_options().xla_gpu_deterministic_ops();
+      ir_emitter_context.debug_options().xla_gpu_deterministic_ops() ||
+      ir_emitter_context.debug_options().xla_gpu_exclude_nondeterministic_ops();
 
   TF_ASSIGN_OR_RETURN(
       GemmConfig config,
@@ -559,8 +564,8 @@ absl::StatusOr<FusionEmissionResult> EmitCustomCall(
       if (!backend_config_str.empty()) {
         mlir::Attribute attr = mlir::parseAttribute(
             backend_config_str, ir_emitter_context.mlir_context());
-        if (auto dict = attr.dyn_cast_or_null<mlir::DictionaryAttr>()) {
-          TF_ASSIGN_OR_RETURN(attributes, BuildAttributesMap(dict));
+        if (auto dict = mlir::dyn_cast_or_null<mlir::DictionaryAttr>(attr)) {
+          TF_ASSIGN_OR_RETURN(attributes, xla::ffi::BuildAttributesMap(dict));
           break;
         }
         return absl::InternalError(

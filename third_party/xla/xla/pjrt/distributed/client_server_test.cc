@@ -15,10 +15,12 @@ limitations under the License.
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/barrier.h"
@@ -33,6 +35,7 @@ limitations under the License.
 #include "xla/pjrt/distributed/topology_util.h"
 #include "xla/protobuf_util.h"
 #include "xla/status_macros.h"
+#include "xla/tsl/distributed_runtime/coordination/coordination_service_agent.h"
 #include "tsl/lib/core/status_test_util.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
@@ -152,7 +155,7 @@ TEST_F(ClientServerTest, ConnectAndShutdownAreBarriers) {
       TF_RET_CHECK(shutdown_count == num_nodes);
     }
 
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -232,7 +235,7 @@ TEST_F(ClientServerTest, ConnectAndEnumerateDevices) {
         std::string value,
         client->BlockingKeyValueGet("key2", absl::InfiniteDuration()));
     TF_RET_CHECK(value == "value2");
-    return OkStatus();
+    return absl::OkStatus();
   };
   auto thread1_fn = [&]() -> absl::Status {
     auto client = GetClient(/*node_id=*/1);
@@ -258,7 +261,7 @@ TEST_F(ClientServerTest, ConnectAndEnumerateDevices) {
         client->BlockingKeyValueGet("key1", absl::InfiniteDuration()));
     TF_RET_CHECK(value == "value1");
     TF_RETURN_IF_ERROR(client->KeyValueSet("key2", "value2"));
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<std::function<absl::Status()>> functions = {thread0_fn,
@@ -312,7 +315,7 @@ TEST_F(ClientServerTest, EnumerateElevenDevices) {
     TF_RET_CHECK(
         xla::protobuf_util::ProtobufEquals(topology, expected_topology))
         << topology.DebugString();
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -348,7 +351,7 @@ TEST_F(ClientServerTest, ZeroInitTimeoutShouldStillWaitForOtherTasks) {
     }
     TF_RETURN_IF_ERROR(client->Connect());
 
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -378,13 +381,13 @@ TEST_F(ClientServerTest, ClientsTerminateShutdownIfAnyClientGoesAway) {
     TF_RETURN_IF_ERROR(client->Connect());
 
     if (node_id == 0) {
-      return OkStatus();
+      return absl::OkStatus();
     }
 
     // The call to Shutdown() should be interrupted if a worker stops issuing
     // heartbeats.
     TF_RETURN_IF_ERROR(client->Shutdown());
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -426,10 +429,10 @@ TEST_F(ClientServerTest, ClientsReceiveMissedHeartbeatIfAnyClientGoesAway) {
     TF_RETURN_IF_ERROR(client->Connect());
 
     if (node_id == 0) {
-      return OkStatus();
+      return absl::OkStatus();
     }
     shutdown.WaitForNotification();
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -477,7 +480,7 @@ TEST_F(ClientServerTest, ClientsTerminateIfServiceGoesAway) {
     shutdown.WaitForNotification();
 
     TF_RETURN_IF_ERROR(client->Shutdown());
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -512,7 +515,7 @@ TEST_F(ClientServerTest, LateClientsAreOk) {
     absl::SleepFor(absl::Milliseconds(200) * node_id);
     TF_RETURN_IF_ERROR(client->Connect());
     TF_RETURN_IF_ERROR(client->Shutdown());
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -550,7 +553,7 @@ TEST_F(ClientServerTest, ConnectEventuallyTimesOutIfAClientDoesNotShowUp) {
 
     TF_RETURN_IF_ERROR(client->Connect());
     TF_RETURN_IF_ERROR(client->Shutdown());
-    return OkStatus();
+    return absl::OkStatus();
   };
 
   // Note: one fewer thread than 'num_nodes'.
@@ -575,11 +578,13 @@ TEST_F(ClientServerTest, WaitAtBarrier_Succeed) {
     auto client = GetClient(node_id);
     TF_RETURN_IF_ERROR(client->Connect());
 
-    TF_RETURN_IF_ERROR(client->WaitAtBarrier("barrier_1", kBarrierTimeout));
-    TF_RETURN_IF_ERROR(client->WaitAtBarrier("barrier_2", kBarrierTimeout));
+    TF_RETURN_IF_ERROR(
+        client->WaitAtBarrier("barrier_1", kBarrierTimeout, std::nullopt));
+    TF_RETURN_IF_ERROR(
+        client->WaitAtBarrier("barrier_2", kBarrierTimeout, std::nullopt));
 
     TF_RETURN_IF_ERROR(client->Shutdown());
-    return xla::OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -608,7 +613,8 @@ TEST_F(ClientServerTest, WaitAtBarrier_Timeout) {
     if (node_id == 1) {
       n.WaitForNotification();
     }
-    Status barrier_status = client->WaitAtBarrier("barrier_1", kBarrierTimeout);
+    absl::Status barrier_status =
+        client->WaitAtBarrier("barrier_1", kBarrierTimeout, std::nullopt);
     // Node 0 notifies that barrier has already timed out.
     if (node_id == 0) {
       n.Notify();
@@ -616,7 +622,7 @@ TEST_F(ClientServerTest, WaitAtBarrier_Timeout) {
     TF_RETURN_IF_ERROR(barrier_status);
 
     TF_RETURN_IF_ERROR(client->Shutdown());
-    return xla::OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -649,10 +655,11 @@ TEST_F(ClientServerTest, WaitAtBarrier_TimeoutWithDifferentBarrierId) {
     } else if (node_id == 1) {
       barrier_id = "barrier_1";
     }
-    TF_RETURN_IF_ERROR(client->WaitAtBarrier(barrier_id, kBarrierTimeout));
+    TF_RETURN_IF_ERROR(
+        client->WaitAtBarrier(barrier_id, kBarrierTimeout, std::nullopt));
 
     TF_RETURN_IF_ERROR(client->Shutdown());
-    return xla::OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -677,11 +684,13 @@ TEST_F(ClientServerTest, WaitAtBarrier_FailWithSameBarrierId) {
     auto client = GetClient(node_id);
     TF_RETURN_IF_ERROR(client->Connect());
 
-    TF_RETURN_IF_ERROR(client->WaitAtBarrier("barrier_1", kBarrierTimeout));
-    TF_RETURN_IF_ERROR(client->WaitAtBarrier("barrier_1", kBarrierTimeout));
+    TF_RETURN_IF_ERROR(
+        client->WaitAtBarrier("barrier_1", kBarrierTimeout, std::nullopt));
+    TF_RETURN_IF_ERROR(
+        client->WaitAtBarrier("barrier_1", kBarrierTimeout, std::nullopt));
 
     TF_RETURN_IF_ERROR(client->Shutdown());
-    return xla::OkStatus();
+    return absl::OkStatus();
   };
 
   std::vector<absl::Status> statuses(num_nodes);
@@ -695,6 +704,92 @@ TEST_F(ClientServerTest, WaitAtBarrier_FailWithSameBarrierId) {
   for (int i = 0; i < num_nodes; ++i) {
     EXPECT_EQ(statuses[i].code(), tsl::error::FAILED_PRECONDITION)
         << " node id: " << i;
+  }
+}
+
+TEST_F(ClientServerTest, WaitAtBarrierSubset_Succeeds) {
+  int num_nodes = 3;
+  StartService(num_nodes);
+  absl::Notification n0, n1;
+
+  auto thread_fn = [&](int node_id) -> absl::Status {
+    auto client = GetClient(node_id);
+    TF_RETURN_IF_ERROR(client->Connect());
+
+    if (node_id != 2) {
+      TF_RETURN_IF_ERROR(client->WaitAtBarrier(
+          "barrier_1", kBarrierTimeout, absl::Span<const int32_t>{0, 1}));
+    }
+
+    TF_RETURN_IF_ERROR(client->Shutdown());
+    return absl::OkStatus();
+  };
+
+  std::vector<absl::Status> statuses(num_nodes);
+  {
+    tsl::thread::ThreadPool thread_pool(tsl::Env::Default(), "test_threads",
+                                        num_nodes);
+    for (int i = 0; i < num_nodes; ++i) {
+      thread_pool.Schedule([&, i]() { statuses[i] = thread_fn(i); });
+    }
+    for (int i = 0; i < num_nodes; ++i) {
+      TF_EXPECT_OK(statuses[i]);
+    }
+  }
+}
+
+TEST_F(ClientServerTest,
+       WaitAtBarrierSubsetNonParticipatingProcessAttempts_Fails) {
+  int num_nodes = 3;
+  StartService(num_nodes);
+  absl::Notification n;
+  absl::Barrier barrier(num_nodes + 1);
+
+  // Timeline:
+  // 1. Node 1, 2 joins barrier.
+  // 2. Barrier fails because node 2 is unexpected.
+  // 3. Node 0 joins barrier, but fails because barrier already failed.
+
+  auto thread_fn = [&](int node_id) -> absl::Status {
+    auto client = GetClient(node_id);
+    TF_RETURN_IF_ERROR(client->Connect());
+
+    // Node 0 will be notified only after the barrier has failed and will thus
+    // fail too.
+    if (node_id == 0) {
+      n.WaitForNotification();
+    }
+    auto status = client->WaitAtBarrier("barrier_1", kBarrierTimeout,
+                                        absl::Span<const int32_t>{0, 1});
+    // Node 1 will fail in the barrier because non-participating node 2 also
+    // calls it.
+    if (node_id == 1) {
+      n.Notify();
+    }
+    // Not calling `Shutdown` because the client will have already returned
+    // error in the previous call to `WaitAtBarrier` for all 3 nodes. In the
+    // error state, calling `Shutdown` is undefined behavior.
+    return status;
+  };
+
+  std::vector<absl::Status> statuses(num_nodes);
+  {
+    tsl::thread::ThreadPool thread_pool(tsl::Env::Default(), "test_threads",
+                                        num_nodes);
+    for (int i = 0; i < num_nodes; ++i) {
+      thread_pool.Schedule([&, i]() {
+        statuses[i] = thread_fn(i);
+        barrier.Block();
+      });
+    }
+
+    // Block until the threads have finished execution.
+    barrier.Block();
+
+    for (int i = 0; i < num_nodes; ++i) {
+      EXPECT_EQ(statuses[i].code(), tsl::error::INVALID_ARGUMENT)
+          << " node id: " << i << " status: " << statuses[i].message();
+    }
   }
 }
 

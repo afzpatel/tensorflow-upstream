@@ -64,6 +64,7 @@ limitations under the License.
 #include "xla/python/ifrt/device.h"
 #include "xla/python/ifrt/dtype.h"
 #include "xla/python/ifrt/executable.h"
+#include "xla/python/ifrt/hlo/hlo_program.h"
 #include "xla/python/ifrt/host_callback.h"
 #include "xla/python/ifrt/memory.h"
 #include "xla/python/nb_absl_span.h"  // IWYU pragma: keep
@@ -87,8 +88,8 @@ limitations under the License.
 #include "xla/service/platform_util.h"  // IWYU pragma: keep
 #include "xla/shape.h"
 #include "xla/status_macros.h"
+#include "xla/tsl/concurrency/ref_count.h"
 #include "xla/util.h"
-#include "tsl/concurrency/ref_count.h"
 #include "tsl/platform/casts.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
@@ -421,6 +422,7 @@ PyClient::CompileIfrtProgram(
     TF_ASSIGN_OR_RETURN(ifrt_loaded_executable,
                         client->ifrt_client_->GetDefaultCompiler()->Compile(
                             std::move(ifrt_program), std::move(ifrt_options)));
+    TF_RETURN_IF_ERROR(ifrt_loaded_executable->GetReadyFuture().Await());
     TF_ASSIGN_OR_RETURN(fingerprint, ifrt_loaded_executable->Fingerprint());
   }
   auto traceback = Traceback::Get();
@@ -436,7 +438,7 @@ PyClient::CompileIfrtProgram(
   TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> module,
                       ParseMlirModuleString(mlir_module, context));
   return CompileIfrtProgram(
-      client, std::make_unique<xla::ifrt::XlaProgram>(module.get()),
+      client, std::make_unique<xla::ifrt::HloProgram>(module.get()),
       MakeIfrtCompileOptions(std::move(options), std::move(host_callbacks)));
 }
 

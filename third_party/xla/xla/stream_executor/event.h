@@ -24,8 +24,7 @@ limitations under the License.
 namespace stream_executor {
 
 class EventInterface;
-class Stream;
-class StreamExecutor;
+class StreamExecutorInterface;
 
 // The Event class, when supported by a platform, enables low-overhead status
 // reporting for a Stream. An Event is inserted at a location in a stream via
@@ -44,14 +43,11 @@ class Event {
     kComplete,
   };
 
-  explicit Event(StreamExecutor* stream_exec);  // NOLINT
+  Event(StreamExecutorInterface* stream_exec,
+        std::unique_ptr<EventInterface> implementation);
 
   // Releases any resources held by the Event object.
   ~Event();
-
-  // Performs any platform-specific or potentially error-generating
-  // initialization.
-  bool Init();
 
   // Returns the current Status for the event.
   Status PollForStatus();
@@ -67,11 +63,9 @@ class Event {
   Event& operator=(Event&&);
 
  private:
-  friend class Stream;
-
-  // Pointer to the StreamExecutor interface used to create this object.
-  // Not owned.
-  StreamExecutor* stream_exec_;
+  // Pointer to the StreamExecutorInterface interface used to create this
+  // object. Not owned.
+  StreamExecutorInterface* stream_exec_;
 
   // Pointer to the platform-specific EventInterface implementation underlying
   // the object. Owned.

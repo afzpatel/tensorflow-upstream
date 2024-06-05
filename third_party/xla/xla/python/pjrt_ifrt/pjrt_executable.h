@@ -44,9 +44,9 @@ limitations under the License.
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
 #include "xla/python/pjrt_ifrt/pjrt_host_callback.h"
 #include "xla/status.h"
+#include "xla/tsl/concurrency/ref_count.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/concurrency/ref_count.h"
 
 namespace xla {
 namespace ifrt {
@@ -81,8 +81,6 @@ class PjRtExecutable final
     : public llvm::RTTIExtends<PjRtExecutable, PjRtCompatibleExecutable> {
  public:
   // Creates PjRtExecutable from xla::PjRtExecutable.
-  static absl::StatusOr<std::unique_ptr<Executable>> Create(
-      std::unique_ptr<xla::PjRtExecutable> pjrt_executable);
   static absl::StatusOr<std::unique_ptr<Executable>> Create(
       std::shared_ptr<xla::PjRtExecutable> pjrt_executable);
 
@@ -177,10 +175,6 @@ class PjRtLoadedExecutable final
   // PjRtLoadedExecutable::GetHloModules() must be implemented.
   static absl::StatusOr<std::unique_ptr<LoadedExecutable>> Create(
       PjRtCompatibleClient* client,
-      std::unique_ptr<xla::PjRtLoadedExecutable> pjrt_loaded_executable,
-      std::vector<tsl::RCReference<LoadedHostCallback>> loaded_host_callbacks);
-  static absl::StatusOr<std::unique_ptr<LoadedExecutable>> Create(
-      PjRtCompatibleClient* client,
       std::shared_ptr<xla::PjRtLoadedExecutable> pjrt_loaded_executable,
       std::vector<tsl::RCReference<LoadedHostCallback>> loaded_host_callbacks);
 
@@ -215,10 +209,10 @@ class PjRtLoadedExecutable final
     return pjrt_loaded_executable_->name();
   }
 
-  Future<absl::Status> GetReadyFuture() const override {
+  Future<> GetReadyFuture() const override {
     // PjRtCompiler blocks until compilation finishes and returns only the
     // executables that are ready.
-    return Future<absl::Status>(absl::OkStatus());
+    return Future<>(absl::OkStatus());
   }
 
   std::optional<std::vector<OpSharding>> GetParameterShardings()
@@ -282,7 +276,7 @@ class PjRtLoadedExecutable final
       absl::Span<tsl::RCReference<Array>> args, const ExecuteOptions& options,
       std::optional<DeviceList> devices) override;
 
-  Future<Status> Delete() override;
+  Future<> Delete() override;
   bool IsDeleted() const override {
     DCHECK(this);
     return pjrt_loaded_executable_->IsDeleted();
@@ -329,11 +323,18 @@ class PjRtLoadedExecutable final
 
   PjRtCompatibleClient* client_;
   std::shared_ptr<xla::PjRtLoadedExecutable> pjrt_loaded_executable_;
+  // Devices that `pjrt_loaded_executable_` runs on. Empty if the executable is
+  // portable.
   DeviceList devices_;
   std::vector<Device*> addressable_devices_;
   std::shared_ptr<std::vector<tsl::RCReference<LoadedHostCallback>>>
       all_loaded_host_callbacks_;
   std::vector<PjRtHostSendAndRecvLoadedHostCallback*> host_send_recv_callbacks_;
+
+  // Output array specs. If the executable is portable, shardings in
+  // `output_shardings_` will use an arbitrary addressable device, and will be
+  // overridden by a `SingleDeviceSharding` generated on the fly at execution
+  // time.
   std::vector<DType> output_dtypes_;
   std::vector<Shape> output_shapes_;
   std::vector<std::shared_ptr<const Sharding>> output_shardings_;

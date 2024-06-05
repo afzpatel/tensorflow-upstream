@@ -1189,7 +1189,6 @@ Status EagerContextDistributedManager::EnableCollectiveOps(
   return absl::OkStatus();
 }
 
-
 Status EagerContextDistributedManager::CheckRemoteAlive(
     const std::string& remote_task_name, bool* is_alive) {
   *is_alive = false;

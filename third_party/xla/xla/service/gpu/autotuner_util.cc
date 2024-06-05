@@ -53,6 +53,14 @@ limitations under the License.
 
 namespace xla {
 namespace gpu {
+namespace {
+
+// Bump this version whenever you change the structure of the results.
+// LINT.IfChange(version)
+constexpr int kVersion = 3;
+// LINT.ThenChange()
+
+}  // namespace
 
 using AutotuneCacheMap = absl::flat_hash_map<AutotuneCacheKey, AutotuneResult>;
 
@@ -103,6 +111,7 @@ static void SerializeAutotuneEntry(AutotuneResults* results,
     SerializeAutotuneEntry(results, k, &result);
   }
 
+  results->set_version(kVersion);
   SortAutotuneResults(results);
 
   return absl::OkStatus();
@@ -111,7 +120,7 @@ static void SerializeAutotuneEntry(AutotuneResults* results,
 /*static*/ absl::Status AutotunerUtil::LoadAutotuneResults(
     const AutotuneResults& results) {
   absl::MutexLock lock(&autotune_cache_mu);
-  for (const auto& result : results.results()) {
+  for (const AutotuneResults::Entry& result : results.results()) {
     autotune_cache[AutotuneCacheKey(result.device(), result.hlo())] =
         result.result();
   }
@@ -220,11 +229,6 @@ static AutotuneResult* TryFindInCache(const AutotuneCacheKey& key) {
 
 namespace {
 
-// Bump this version whenever you change the structure of the results.
-// LINT.IfChange(version)
-constexpr int kVersion = 3;
-// LINT.ThenChange()
-
 bool IsTextProtoPath(absl::string_view file_path) {
   return absl::EndsWith(file_path, ".txt") ||
          absl::EndsWith(file_path, ".textproto") ||
@@ -259,27 +263,36 @@ bool IsTextProtoPath(absl::string_view file_path) {
 /*static*/ absl::StatusOr<std::string> AutotunerUtil::SerializeAutotuneResults(
     bool as_textproto) {
   AutotuneResults results;
-  results.set_version(kVersion);
   TF_RETURN_IF_ERROR(SerializeAutotuneResults(&results));
   return AutotuneResultsToString(results, as_textproto);
 }
 
-/*static*/ absl::Status AutotunerUtil::SerializeAutotuneResultsToFile(
-    absl::string_view file_path) {
+/* static */ absl::Status AutotunerUtil::SerializeAutotuneResultsToFile(
+    const AutotuneResults& results, absl::string_view file_path) {
   TF_RET_CHECK(!file_path.empty());
+  TF_RET_CHECK(results.version() > 0)
+      << "Did you call SerializeAutotuneResults to get this AutotuneResults?";
 
   std::string resolved_path;
   if (!tsl::io::ResolveTestPrefixes(file_path, resolved_path)) {
     return FailedPrecondition("File path can not be resolved: %s", file_path);
   }
 
-  TF_ASSIGN_OR_RETURN(std::string autotune_results_str,
-                      SerializeAutotuneResults(IsTextProtoPath(resolved_path)));
+  TF_ASSIGN_OR_RETURN(
+      std::string autotune_results_str,
+      AutotuneResultsToString(results, IsTextProtoPath(resolved_path)));
   TF_RETURN_IF_ERROR(tsl::WriteStringToFile(tsl::Env::Default(), resolved_path,
                                             autotune_results_str));
   LOG(INFO) << "Autotune results serialized to file: " << resolved_path;
 
   return absl::OkStatus();
+}
+
+/*static*/ absl::Status AutotunerUtil::SerializeAutotuneResultsToFile(
+    absl::string_view file_path) {
+  AutotuneResults results;
+  TF_RETURN_IF_ERROR(SerializeAutotuneResults(&results));
+  return SerializeAutotuneResultsToFile(results, file_path);
 }
 
 /*static*/ absl::Status AutotunerUtil::LoadAutotuneResultsFromFile(
@@ -317,25 +330,6 @@ AutotunerUtil::CreateRedzoneAllocator(const AutotuneConfig& config,
       /*redzone_size=*/config.should_check_correctness()
           ? opts.xla_gpu_redzone_padding_bytes()
           : 0);
-}
-
-/*static*/ absl::StatusOr<std::string>
-AutotunerUtil::SerializeAutotuneResultsForModule(
-    const HloModule& module, const AutotuneConfig& autotune_config,
-    bool as_textproto) {
-  AutotuneResults results;
-  results.set_version(kVersion);
-
-  for (const HloInstruction* instr :
-       module.entry_computation()->instructions()) {
-    AutotuneCacheKey k(autotune_config.GetModelStr(), *instr);
-    if (const AutotuneResult* res = TryFindInCache(k)) {
-      SerializeAutotuneEntry(&results, k, res);
-    }
-  }
-
-  SortAutotuneResults(&results);
-  return AutotuneResultsToString(results, as_textproto);
 }
 
 }  // namespace gpu

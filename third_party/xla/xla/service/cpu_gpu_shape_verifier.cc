@@ -28,7 +28,7 @@ limitations under the License.
 namespace xla {
 
 namespace {
-Status VerifyS4U4Usage(HloInstruction* instruction) {
+absl::Status VerifyS4U4Usage(HloInstruction* instruction) {
   switch (instruction->opcode()) {
     case HloOpcode::kBitcast:
     case HloOpcode::kConstant:
@@ -45,10 +45,12 @@ Status VerifyS4U4Usage(HloInstruction* instruction) {
     default:
       TF_RETURN_IF_ERROR(ShapeUtil::ForEachSubshapeWithStatus(
           instruction->shape(), [&](const Shape& shape, const ShapeIndex&) {
-            if (primitive_util::Is4BitType(shape.element_type())) {
+            if (primitive_util::IsSubByteNonPredType(shape.element_type())) {
               return absl::InvalidArgumentError(absl::StrFormat(
-                  "S4/U4 is currently only supported in convert instructions, "
-                  "but got instruction with S4/U4 input: %s",
+                  "%s is currently only supported in convert instructions, "
+                  "but got instruction: %s",
+                  primitive_util::LowercasePrimitiveTypeName(
+                      shape.element_type()),
                   instruction->ToString()));
             }
             return OkStatus();
@@ -60,7 +62,7 @@ Status VerifyS4U4Usage(HloInstruction* instruction) {
 }
 }  // namespace
 
-Status CpuGpuShapeVerifier::Preprocess(HloInstruction* hlo) {
+absl::Status CpuGpuShapeVerifier::Preprocess(HloInstruction* hlo) {
   TF_RETURN_IF_ERROR(ShapeUtil::ForEachSubshapeWithStatus(
       hlo->shape(), [&](const Shape& shape, const ShapeIndex&) {
         if (shape.has_layout()) {
@@ -69,11 +71,11 @@ Status CpuGpuShapeVerifier::Preprocess(HloInstruction* hlo) {
                 "The XLA CPU/GPU backend does not support sparse shapes: %s",
                 hlo->ToString()));
           }
-          if (!primitive_util::Is4BitType(shape.element_type()) &&
+          if (!primitive_util::IsSubByteNonPredType(shape.element_type()) &&
               shape.layout().element_size_in_bits() != 0) {
             return absl::InvalidArgumentError(absl::StrFormat(
                 "The XLA CPU/GPU backend does not support custom element sizes "
-                "on non-4-bit types: %s",
+                "on non-sub-byte-bit types: %s",
                 hlo->ToString()));
           }
         }

@@ -30,6 +30,7 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
@@ -43,7 +44,6 @@ limitations under the License.
 #include "xla/service/hlo.pb.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/hlo_verifier.h"
-#include "xla/status.h"
 #include "xla/tests/test_utils.h"
 #include "xla/tools/hlo_control_flow_flattening.h"
 #include "xla/tools/hlo_decomposer.h"
@@ -287,8 +287,8 @@ absl::Status RunAndCompareInternal(
   }
 
   if (reference_module == nullptr) {
-    std::cerr << "Skipping reference runner";
-    return OkStatus();
+    std::cerr << "Skipping reference runner\n";
+    return absl::OkStatus();
   }
   if (const HloInstruction* root_instruction =
           reference_module->entry_computation()->root_instruction();
@@ -299,7 +299,7 @@ absl::Status RunAndCompareInternal(
     if (reference_run_result != nullptr) {
       *reference_run_result = ModuleResult::kSkipped;
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   TF_ASSIGN_OR_RETURN(
@@ -441,7 +441,7 @@ absl::Status RunIsolatedAndCompare(
       std::vector<std::unique_ptr<HloModule>> modules,
       DecomposeHloModule(*test_module, /*deduplicate_modules=*/true));
 
-  absl::Status status = OkStatus();
+  absl::Status status = absl::OkStatus();
   for (std::unique_ptr<HloModule>& module : modules) {
     const std::string module_name = module->name();
     ModuleResult test_module_result = ModuleResult::kDidntRun;
@@ -496,12 +496,16 @@ absl::Status RunAndCompare(
     std::function<absl::Status(const RunHloModuleOptions& options,
                                HloModule& module)>
         compilation_env_modifier_hook) {
+  std::string input_format = options.input_format;
+  if (input_format.empty()) {
+    input_format = std::string(tsl::io::Extension(hlo_filename));
+  }
   BufferAssignmentProto buffer_assignment_proto;
   TF_ASSIGN_OR_RETURN(
       auto test_module,
       LoadModuleFromFile(
-          hlo_filename, options.input_format,
-          hlo_module_loader_details::Config(), config_modifier_hook,
+          hlo_filename, input_format, hlo_module_loader_details::Config(),
+          config_modifier_hook,
           options.use_buffer_assignment_from_proto ? &buffer_assignment_proto
                                                    : nullptr));
   HloVerifier verifier(
@@ -522,15 +526,13 @@ absl::Status RunAndCompare(
   if (iteration_literals_proto == nullptr) {
     // User did not explicitly give input
     if (!options.force_fake_data && !options.isolate_instructions &&
-        (options.input_format == "pb" || options.input_format == "pbtxt")) {
+        (input_format == "pb" || input_format == "pbtxt")) {
       // User is giving a snapshot (which contains inputs)
       LOG(INFO) << "Using input data from the user-provided snapshot.";
-      TF_ASSIGN_OR_RETURN(
-          iteration_literals_proto_local,
-          LoadInputFromFile(hlo_filename, options.input_format));
+      TF_ASSIGN_OR_RETURN(iteration_literals_proto_local,
+                          LoadInputFromFile(hlo_filename, input_format));
       iteration_literals_proto = iteration_literals_proto_local.get();
-    } else if (options.input_format == "pb" ||
-               options.input_format == "pbtxt") {
+    } else if (input_format == "pb" || input_format == "pbtxt") {
       LOG(INFO)
           << "Ignoring input data from snapshot and using fake data instead.";
     }

@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -36,7 +37,6 @@ limitations under the License.
 #include "xla/service/call_graph.h"
 #include "xla/service/collective_ops_utils.h"
 #include "xla/service/hlo_replication_analysis.h"
-#include "xla/status.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/statusor.h"
 
@@ -781,7 +781,7 @@ absl::Status ChangeAccumulatorShapesInLoopBodies(
     }
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Creates all the sinked all-reduce instructions in the while instruction's
@@ -927,7 +927,7 @@ absl::Status AddSinkedAllReducesAndReplaceWhile(
       CreateNewWhileResult(new_while_instruction, tuple_index_to_new_buffer);
   TF_RETURN_IF_ERROR(while_instruction->parent()->ReplaceInstruction(
       while_instruction, new_while_result));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace

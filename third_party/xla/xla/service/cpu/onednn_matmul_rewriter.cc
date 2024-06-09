@@ -355,7 +355,6 @@ inline auto OptionalConvertAndBitcast(HloInstruction** optional_convert,
   //   4. pattern-root
   auto common = m::AnyOf<HloInstruction>(
       pu::SupportedConvert(optional_convert, std::move(pattern).WithOneUser())
-          .WithOperand(0, m::Op().WithElementType(PrimitiveType::BF16))
           .WithElementType(PrimitiveType::F32),
       std::move(pattern).WithOneUser());
   return m::AnyOf<HloInstruction>(
@@ -649,7 +648,7 @@ class OneDnnMatMulRewriteVisitor : public DfsHloRewriteVisitor {
     return Match(instr, pattern);
   }
 
-  Status HandleSelect(HloInstruction* instr) override {
+  absl::Status HandleSelect(HloInstruction* instr) override {
     HloInstruction* matmul_call;
     HloInstruction* intermediate_instr = nullptr;
     HloInstruction* optional_bitcast = nullptr;
@@ -667,7 +666,7 @@ class OneDnnMatMulRewriteVisitor : public DfsHloRewriteVisitor {
     return absl::OkStatus();
   }
 
-  Status HandleTanh(HloInstruction* instr) override {
+  absl::Status HandleTanh(HloInstruction* instr) override {
     HloInstruction* matmul_call;
     HloInstruction* intermediate_instr = nullptr;
     HloInstruction* optional_bitcast = nullptr;
@@ -683,7 +682,7 @@ class OneDnnMatMulRewriteVisitor : public DfsHloRewriteVisitor {
     return absl::OkStatus();
   }
 
-  Status HandleClamp(HloInstruction* instr) override {
+  absl::Status HandleClamp(HloInstruction* instr) override {
     HloInstruction* matmul_call;
     HloInstruction* intermediate_instr = nullptr;
     HloInstruction* optional_bitcast = nullptr;
@@ -731,7 +730,10 @@ class OneDnnMatMulRewriteVisitor : public DfsHloRewriteVisitor {
 
     if (Match(instr, pattern)) {
       std::vector<HloInstruction*> new_operands;
-      auto constant_value = *GetConstantValueAsFloat32(constant);
+      auto constant_value = GetConstantValueAsFloat32(constant);
+      if (!constant_value) {
+        return absl::OkStatus();
+      }
 
       for (auto operand : dot->operands()) {
         new_operands.push_back(operand);
@@ -744,7 +746,7 @@ class OneDnnMatMulRewriteVisitor : public DfsHloRewriteVisitor {
       // Casting to int32 because of issues in proto config for decimal types
       // handling.
       backend_config->mutable_onednn_matmul_config()->set_alpha_typecast(
-          *(reinterpret_cast<int32_t*>(&constant_value)));
+          *(reinterpret_cast<int32_t*>(&constant_value.value())));
       TF_RETURN_IF_ERROR(matmul_call->set_backend_config(*backend_config));
       HloInstruction* new_instr;
       if (optional_convert != nullptr &&
@@ -758,6 +760,30 @@ class OneDnnMatMulRewriteVisitor : public DfsHloRewriteVisitor {
       }
 
       TF_RETURN_IF_ERROR(ReplaceInstruction(instr, new_instr));
+    }
+    return absl::OkStatus();
+  }
+
+  auto SigmoidActivation(HloInstruction* instr, HloInstruction** src) {
+    return Match(instr,
+                 m::Divide(BcastConstScalar(1.0),
+                           m::AddAnyOrder(BcastConstScalar(1.0),
+                                          m::Exp(m::Negate(m::Op(src))))));
+  }
+
+  absl::Status HandleDivide(HloInstruction* instr) override {
+    HloInstruction* matmul_call;
+    HloInstruction* intermediate_instr = nullptr;
+    HloInstruction* optional_bitcast = nullptr;
+    HloInstruction* src;
+    if (SigmoidActivation(instr, &src)) {
+      if (Match(src, ElementwiseSafeIntermediates(
+                         &intermediate_instr, &optional_bitcast,
+                         OneDnnMatmulInstr(&matmul_call))
+                         .WithOneUser())) {
+        return FuseActivation(OneDnnMatMulConfig::SIGMOID, instr, matmul_call,
+                              intermediate_instr, optional_bitcast);
+      }
     }
     return absl::OkStatus();
   }

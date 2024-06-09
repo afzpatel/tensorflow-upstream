@@ -26,6 +26,7 @@ limitations under the License.
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
@@ -51,7 +52,6 @@ limitations under the License.
 #include "xla/service/tuple_util.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/status_macros.h"
 #include "xla/statusor.h"
 #include "xla/util.h"
@@ -1912,7 +1912,7 @@ class DynamicShapeRemovingVisitor : public DfsHloRewriteVisitor {
 absl::StatusOr<HloInstruction*> DynamicShapeRemovingVisitor::ConvertToDynamic(
     HloInstruction* inst) {
   if (!dynamic_dimension_inference_->HasDynamicDimension(inst)) {
-    return OkStatus();
+    return absl::OkStatus();
   }
   MarkAsChanged();
   Shape shape = dynamic_dimension_inference_->GetDynamicShape(inst);
@@ -1958,7 +1958,7 @@ absl::Status DynamicShapeRemovingVisitor::ConvertOperandsToDynamic(
       MarkAsChanged();
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::DefaultAction(HloInstruction* hlo) {
@@ -1981,7 +1981,7 @@ absl::Status DynamicShapeRemovingVisitor::DefaultAction(HloInstruction* hlo) {
 
   // If the input to an op is static, we are done.
   if (!input_is_dynamic) {
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   // Op doesn't support dynamic tensor, but by now we should have already
@@ -1990,24 +1990,24 @@ absl::Status DynamicShapeRemovingVisitor::DefaultAction(HloInstruction* hlo) {
       << "Dynamic input unexpectedly found for unsupported instruction: "
       << hlo->ToString();
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleGetTupleElement(
     HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleTuple(HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleInfeed(HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleParameter(HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleCustomCall(
@@ -2016,7 +2016,7 @@ absl::Status DynamicShapeRemovingVisitor::HandleCustomCall(
       hlo->custom_call_target() == "PadToStatic") {
     // Those ops support are created to handle dynamic tensors so by their
     // nature they support dynamic lowering.
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   return DefaultAction(hlo);
@@ -2026,39 +2026,39 @@ absl::Status DynamicShapeRemovingVisitor::HandleAsyncStart(
     HloInstruction* hlo) {
   if (HloInstruction::IsThreadIncluded(hlo->async_execution_thread(),
                                        execution_threads_)) {
-    return OkStatus();
+    return absl::OkStatus();
   }
   return ConvertOperandsToDynamic(hlo);
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleAsyncUpdate(
     HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleAsyncDone(HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleWhile(HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleConditional(
     HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleGetDimensionSize(
     HloInstruction* hlo) {
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status DynamicShapeRemovingVisitor::HandleSetDimensionSize(
     HloInstruction* hlo) {
   *hlo->mutable_shape() = hlo->operand(0)->shape();
   hlo->mutable_shape()->set_dynamic_dimension(hlo->dimension(), false);
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace

@@ -23,11 +23,11 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "xla/layout.h"
 #include "xla/printer.h"
 #include "xla/shape.h"
-#include "xla/status.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/logging.h"  // IWYU pragma: keep
 
@@ -301,6 +301,11 @@ class LayoutUtil {
   // stored in a particular split. This can be useful for calculating how much
   // memory to allocate in each of the memories.
   static int64_t MaxElementsInPerSplit(const Shape& shape);
+
+  // Returns the physical shape with the descending layout based on a logical
+  // shape and its layout, e.g., (8,128){0,1} -> (128,8){1,0}.
+  // It only supports the leaf shape but not the tuple shape.
+  static Shape GetPhysicalShapeFromLogicalShape(const Shape& logical_shape);
 };
 
 }  // namespace xla

@@ -32,6 +32,7 @@ limitations under the License.
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
 #include "absl/memory/memory.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
@@ -42,7 +43,6 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/map_util.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/types.h"
 #include "xla/util.h"
 #include "tsl/platform/errors.h"
@@ -1621,7 +1621,7 @@ absl::Status HloDataflowAnalysis::InitializeInstructionValueSets() {
     }
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 void HloDataflowAnalysis::OptimizePhiValues() {
@@ -1764,7 +1764,7 @@ absl::Status HloDataflowAnalysis::Verify() const {
     }
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 bool HloDataflowAnalysis::DoesNotUseOperandBuffer(
@@ -1814,37 +1814,6 @@ bool HloDataflowAnalysis::DoesNotUseOperandBuffer(
 }
 
 namespace {
-
-// Removes layers of tuple indirection introduced via 'tuple' and
-// 'get-tuple-element' instructions to more directly identify the source of the
-// given HLO value (identified by the given `ShapeIndex` into the output of the
-// given `HloInstruction`).
-//
-// e.g. for the following:
-//    %x = some-op(...)
-//    %foo = get-tuple-element(%x), index=0
-//    %bar = tuple(%y, %foo)
-//
-// ... FollowTupleIndirection(%bar, {1}) == {%x, {0}} (output 1 of 'bar' comes
-// from output 0 of %x).
-//
-// Note that all 'tuple' instructions are followed before all
-// 'get-tuple-element' instructions are followed. This is because it is assumed
-// that tupling a value and then extracting it from the tuple again will not
-// occur in properly-optimized IR.
-std::pair<const HloInstruction*, ShapeIndex> FollowTupleIndirection(
-    const HloInstruction* instruction, ShapeIndex operand_index) {
-  while (instruction->opcode() == HloOpcode::kTuple && !operand_index.empty()) {
-    instruction = instruction->operand(operand_index.front());
-    operand_index.pop_front();
-  }
-  while (instruction->opcode() == HloOpcode::kGetTupleElement) {
-    operand_index.push_front(instruction->tuple_index());
-    instruction = instruction->operand(0);
-  }
-
-  return {instruction, operand_index};
-}
 
 // Returns in-place input/output pairs for the given fusion instruction,
 // according to the aliasing rules for the corresponding fusion computation.
@@ -2178,6 +2147,20 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
   // Loop fusions that contain transposing copies won't reach here as they have
   // different layouts, which fails the check in the beginning of this function.
   return user->IsElementwiseOnOperand(user->operand_index(operand));
+}
+
+std::pair<const HloInstruction*, ShapeIndex> FollowTupleIndirection(
+    const HloInstruction* instruction, ShapeIndex operand_index) {
+  while (instruction->opcode() == HloOpcode::kTuple && !operand_index.empty()) {
+    instruction = instruction->operand(operand_index.front());
+    operand_index.pop_front();
+  }
+  while (instruction->opcode() == HloOpcode::kGetTupleElement) {
+    operand_index.push_front(instruction->tuple_index());
+    instruction = instruction->operand(0);
+  }
+
+  return {instruction, operand_index};
 }
 
 }  // namespace xla

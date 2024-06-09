@@ -21847,6 +21847,13 @@ op {
       }
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
 }
 op {
   name: "GatherV2"
@@ -49618,6 +49625,13 @@ op {
         type: DT_INT32
         type: DT_INT64
       }
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
 }

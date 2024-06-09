@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
@@ -32,7 +33,6 @@ limitations under the License.
 #include "xla/layout_util.h"
 #include "xla/service/hlo_creation_utils.h"
 #include "xla/shape.h"
-#include "xla/status.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/statusor.h"
@@ -78,7 +78,7 @@ class BatchDimensionMerger : public DfsHloRewriteVisitor {
                                               dnums.lhs_batch_dimensions()) ||
         !LayoutUtil::AreDimensionsConsecutive(rhs_shape.layout(),
                                               dnums.rhs_batch_dimensions())) {
-      return OkStatus();
+      return absl::OkStatus();
     }
 
     // Index of logically first original batch dimension and the only kept one.

@@ -116,7 +116,7 @@ class HloComputation {
       for (const auto& instruction : instructions_) {
         TF_RETURN_IF_ERROR(func(instruction.get()));
       }
-      return OkStatus();
+      return absl::OkStatus();
     }
 
     HloInstruction* last_added_instruction() const {
@@ -923,7 +923,7 @@ class HloComputation {
     kFusion,
     // This computation is a custom-call computation.
     kCustomCall,
-    // This computation is a while body computation.
+    // This computation is a collective computation.
     kCollective,
     // This computation is a while body computation.
     kWhile,

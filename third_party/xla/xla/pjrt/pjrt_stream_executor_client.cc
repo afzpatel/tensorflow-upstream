@@ -128,7 +128,7 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_tree.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
+#include "xla/status_macros.h"
 #include "xla/statusor.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
@@ -422,7 +422,7 @@ absl::Status AddDestinationBufferSynchronization(
   RecordUsage(std::move(device_buffer), local_device, local_device,
               definition_event, copy_stream,
               /*prefer_to_retain_reference=*/false);
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace
@@ -675,7 +675,7 @@ class ScopedHoldAsExternalReference : public PjRtBuffer::ExternalReference {
          external_reference_->definition_events()) {
       TF_RETURN_IF_ERROR(event->WaitForEventOnExternalStream(stream));
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
  private:
@@ -2129,7 +2129,7 @@ absl::Status CheckCompatibleShapes(bool strict_shape_checking,
       buffer_on_device_shape.element_type() == PrimitiveType::PRED &&
       buffer_on_device_shape.dimensions_size() == 1 &&
       buffer_on_device_shape.dimensions(0) == 0) {
-    return OkStatus();
+    return absl::OkStatus();
   }
   // TODO(misard) Support casting of tuple parameters.
   if (strict_shape_checking || buffer_on_device_shape.IsTuple()) {
@@ -2163,7 +2163,7 @@ absl::Status CheckCompatibleShapes(bool strict_shape_checking,
           ShapeUtil::HumanStringWithLayout(buffer_on_device_shape));
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Makes a tuple from the arguments to an execution.
@@ -2344,7 +2344,7 @@ absl::Status PjRtStreamExecutorLoadedExecutable::SetUpDonation(
     parameters_that_must_be_donated_.emplace_back(
         std::move(parameters_to_donate));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::string_view PjRtStreamExecutorLoadedExecutable::name() const {
@@ -2591,7 +2591,7 @@ class StreamExecutorCopyToDeviceStream : public CopyToDeviceStream {
       done_.SetStateConcrete();
     }
 
-    return PjRtFuture<>(OkStatus());
+    return PjRtFuture<>(absl::OkStatus());
   }
 
  private:
@@ -2907,7 +2907,7 @@ PjRtStreamExecutorLoadedExecutable::MakeOutputBuffers(
   return outputs;
 }
 
-static Status GetFirstInputError(
+static absl::Status GetFirstInputError(
     absl::Span<PjRtBuffer* const> argument_handles) {
   for (auto* handle : argument_handles) {
     auto* buffer = tensorflow::down_cast<PjRtStreamExecutorBuffer*>(handle);
@@ -2919,7 +2919,7 @@ static Status GetFirstInputError(
       }
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::StatusOr<PjRtLoadedExecutable::Result>
@@ -2944,7 +2944,7 @@ PjRtStreamExecutorLoadedExecutable::ExecuteHelper(
     (*device_assignment)(0, 0) = device->id();
   }
 
-  Status input_error = GetFirstInputError(argument_handles);
+  absl::Status input_error = GetFirstInputError(argument_handles);
   if (!input_error.ok()) {
     TF_ASSIGN_OR_RETURN(PjRtMemorySpace * memory_space,
                         device->default_memory_space());
@@ -3348,6 +3348,11 @@ PjRtStreamExecutorClient::Compile(const XlaComputation& computation,
                                   CompileOptions options) {
   tsl::profiler::TraceMe traceme("PjRtStreamExecutorClient::Compile");
   VLOG(1) << "PjRtStreamExecutorClient::Compile";
+  options.executable_build_options.set_process_index(process_index());
+  TF_RET_CHECK(device_count() % addressable_device_count() == 0)
+      << "Each process is expected to have the same number of devices";
+  options.executable_build_options.set_process_count(
+      device_count() / addressable_device_count());
   auto input_options = options;
 
   TF_RETURN_IF_ERROR(options.ApplyAllOptionOverrides());

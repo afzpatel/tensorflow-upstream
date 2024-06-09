@@ -29,6 +29,7 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/functional/bind_front.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 #include "tensorflow/core/profiler/convert/trace_viewer/trace_events_filter_interface.h"
@@ -60,7 +61,7 @@ tsl::Status DoStoreAsLevelDbTable(
 tsl::Status DoLoadFromLevelDbTable(
     const std::string& filename,
     std::unique_ptr<TraceEventsFilterInterface> filter,
-    std::unique_ptr<TraceVisibilityFilter> visibility,
+    std::unique_ptr<TraceVisibilityFilter> visibility_filter,
     int64_t filter_by_visibility_threshold, Trace& trace,
     bool& filter_by_visibility,
     const std::function<TraceEvent*(const TraceEvent&)>& copy_event_to_arena,
@@ -129,7 +130,8 @@ class TraceEventsContainerBase {
   void AddFlowEvent(absl::string_view name, uint32_t resource_id,
                     uint32_t device_id, tsl::profiler::Timespan timespan,
                     uint64_t flow_id, TraceEvent::FlowEntryType flow_entry_type,
-                    ContextType flow_category = ContextType::kGeneric,
+                    tsl::profiler::ContextType flow_category =
+                        tsl::profiler::ContextType::kGeneric,
                     RawData* raw_data = nullptr,
                     std::optional<int64_t> group_id = std::nullopt) {
     TraceEvent* event = CreateArenaEvent();
@@ -161,7 +163,8 @@ class TraceEventsContainerBase {
   void AddAsyncEvent(absl::string_view name, uint32_t device_id,
                      tsl::profiler::Timespan timespan, uint64_t flow_id,
                      TraceEvent::FlowEntryType flow_entry_type,
-                     ContextType flow_category = ContextType::kGeneric,
+                     tsl::profiler::ContextType flow_category =
+                         tsl::profiler::ContextType::kGeneric,
                      RawData* raw_data = nullptr,
                      std::optional<int64_t> group_id = std::nullopt) {
     TraceEvent* event = CreateArenaEvent();
@@ -249,6 +252,10 @@ class TraceEventsContainerBase {
     trace.set_num_events(NumEvents());
     auto events_by_level = EventsByLevel();
     return DoStoreAsLevelDbTable(file, trace, events_by_level);
+  }
+
+  std::vector<std::vector<const TraceEvent*>> GetTraceEventsByLevel() const {
+    return EventsByLevel();
   }
 
   // Loads the contents of this container from a level-db sstable file.

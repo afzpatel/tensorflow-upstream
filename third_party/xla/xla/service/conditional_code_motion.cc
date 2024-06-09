@@ -29,6 +29,7 @@ limitations under the License.
 #include "absl/container/inlined_vector.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/numbers.h"
 #include "xla/debug_options_flags.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
@@ -45,7 +46,6 @@ limitations under the License.
 #include "xla/service/tuple_simplifier.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/status_macros.h"
 #include "xla/statusor.h"
 #include "xla/types.h"
@@ -530,7 +530,7 @@ absl::Status RestructureConditionalInstruction(HloComputation* computation,
     }
   }
   VLOG(2) << "computation after root restructure:\n" << computation->ToString();
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::StatusOr<bool> ConvertSpecialMove(HloInstruction* conditional,
@@ -953,7 +953,7 @@ class MoveOperandIntoBranch {
     if (inst->user_count() == 0) {
       TF_RETURN_IF_ERROR(inst->parent()->RemoveInstruction(inst));
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
  private:
@@ -1135,7 +1135,7 @@ class MoveOperandIntoBranch {
       }
       VLOG(2) << "User: " << user->ToString() << "\n";
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
   absl::Status MoveInputIntoBranch(
       HloInstruction* input, HloInstruction*& user,
@@ -1212,7 +1212,7 @@ class MoveOperandIntoBranch {
         UpdateTupleUsers(inserted);
       }
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
   void UpdateTupleUsers(HloInstruction* param_user) {
     for (auto new_user : param_user->users()) {

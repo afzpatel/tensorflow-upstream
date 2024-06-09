@@ -28,6 +28,7 @@ limitations under the License.
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/array.h"
@@ -45,7 +46,6 @@ limitations under the License.
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/service/hlo_pass_interface.h"
 #include "xla/shape.h"
-#include "xla/status.h"
 
 namespace xla {
 
@@ -357,10 +357,6 @@ GenerateReshardingCostsAndMissingShardingsForAllOperands(
     const StrategyMap& strategy_map, const ClusterEnvironment& cluster_env,
     const CallGraph& call_graph,
     std::vector<std::optional<HloSharding>>& input_shardings);
-
-bool LeafVectorsAreConsistent(const std::vector<ShardingStrategy>& one,
-                              const std::vector<ShardingStrategy>& two,
-                              bool is_reshape);
 
 std::unique_ptr<StrategyGroup> MaybeFollowInsStrategyGroup(
     const StrategyGroup* src_strategy_group, const Shape& shape,

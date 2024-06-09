@@ -132,7 +132,7 @@ cc_library(
         # keep sorted
         ":rocm_driver",
         "//xla/stream_executor",
-        "//xla/stream_executor:stream_executor_interface",
+        "//xla/stream_executor:stream_executor_h",
         "//xla/stream_executor/gpu:gpu_activation",
         "//xla/stream_executor/platform",
         "@local_config_rocm//rocm:rocm_headers",
@@ -142,6 +142,7 @@ cc_library(
 cc_library(
     name = "rocm_event",
     srcs = if_rocm_is_configured(["rocm_event.cc"]),
+    hdrs = if_rocm_is_configured(["rocm_event.h"]),
     deps = if_rocm_is_configured([
         # keep sorted
         ":rocm_driver",
@@ -167,7 +168,6 @@ cc_library(
         "//xla/stream_executor",
         "//xla/stream_executor:kernel",
         "//xla/stream_executor:plugin_registry",
-        "//xla/stream_executor:stream_executor_headers",
         "//xla/stream_executor/gpu:gpu_activation_header",
         "//xla/stream_executor/gpu:gpu_collectives_header",
         "//xla/stream_executor/gpu:gpu_command_buffer",
@@ -224,7 +224,6 @@ cc_library(
         ":rocm_runtime",
         "//xla/stream_executor",  # buildcleaner: keep
         "//xla/stream_executor:executor_cache",
-        "//xla/stream_executor:stream_executor_headers",
         "//xla/stream_executor/gpu:gpu_driver_header",
         "//xla/stream_executor/gpu:gpu_executor_header",
         "//xla/stream_executor/platform",
@@ -294,7 +293,7 @@ cc_library(
         "//xla/stream_executor:blas",
         "//xla/stream_executor:host_or_device_scalar",
         "//xla/stream_executor:plugin_registry",
-        "//xla/stream_executor:stream_executor_interface",
+        "//xla/stream_executor:stream_executor_h",
         "//xla/stream_executor/gpu:gpu_activation",
         "//xla/stream_executor/gpu:gpu_blas_lt",
         "//xla/stream_executor/gpu:gpu_executor_header",
@@ -342,7 +341,6 @@ cc_library(
         "//xla/stream_executor",
         "//xla/stream_executor:fft",
         "//xla/stream_executor:plugin_registry",
-        "//xla/stream_executor:stream_executor_headers",
         "//xla/stream_executor/gpu:gpu_activation",
         "//xla/stream_executor/gpu:gpu_executor_header",
         "//xla/stream_executor/gpu:gpu_helpers_header",
@@ -393,7 +391,6 @@ cc_library(
         "//xla/stream_executor:device_memory_allocator",
         "//xla/stream_executor:dnn",
         "//xla/stream_executor:plugin_registry",
-        "//xla/stream_executor:stream_interface",
         "//xla/stream_executor/gpu:gpu_activation",
         "//xla/stream_executor/gpu:gpu_driver_header",
         "//xla/stream_executor/gpu:gpu_executor_header",

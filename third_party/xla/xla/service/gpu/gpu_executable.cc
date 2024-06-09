@@ -70,7 +70,6 @@ limitations under the License.
 #include "xla/service/xla_debug_info_manager.h"
 #include "xla/shape_tree.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/status_macros.h"
 #include "xla/stream_executor/cuda/cuda_platform_id.h"
 #include "xla/stream_executor/device_description.h"
@@ -355,15 +354,23 @@ absl::Status RendezvousAfterInitialization(
     const ServiceExecutableRunOptions* run_options);
 
 absl::Status ExecuteThunks(
-    const std::string& module_name, ModuleIdentifier module_id,
-    const ThunkSequence& thunk_sequence,
+    const DebugOptions* debug_options, const std::string& module_name,
+    ModuleIdentifier module_id, const ThunkSequence& thunk_sequence,
     Thunk::ExecutableSource executable_source,
     const ServiceExecutableRunOptions* run_options,
     const BufferAllocations& buffer_allocations, bool block_host_until_done,
-    bool use_highest_priority_for_async_stream,
     const absl::flat_hash_set<ExecutionStreamId>& execution_stream_ids,
-    int64_t collective_max_nchannels, int64_t p2p_max_nchannels,
     const ModuleAnnotations& module_annotations) {
+  int64_t collective_max_nchannels =
+      debug_options ? debug_options->xla_gpu_nccl_collective_max_nchannels()
+                    : 0;
+  int64_t p2p_max_nchannels =
+      debug_options ? debug_options->xla_gpu_nccl_p2p_max_nchannels() : 0;
+  bool use_highest_priority_for_async_stream =
+      debug_options
+          ? debug_options->xla_gpu_enable_highest_priority_async_stream()
+          : false;
+
   se::Stream* main_stream = run_options->stream();
   se::StreamExecutor* executor = main_stream->parent();
   stream_executor::StreamPriority stream_priority =
@@ -857,6 +864,36 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
       GenerateBufferAllocations(arguments, globals, memory_allocator,
                                 device_ordinal));
   VLOG(3) << buffer_allocations.ToString();
+  absl::Span<const BufferAllocation> allocations = GetAllocations();
+
+  if (VLOG_IS_ON(5)) {
+    // Debug code to compare current allocation's address with previous run's
+    // address, and report the allocation info if memory addressed changed.
+    // Useful for identify in user's model if it is command buffer perf friendly
+    // (no command buffer update cost).
+    absl::MutexLock lock(&module_handle_mutex_);
+    if (module_allocations_.find(executor) == module_allocations_.end()) {
+      std::vector<se::DeviceMemoryBase> allocs_addr;
+      allocs_addr.reserve(buffer_allocations.size());
+      for (int i = 0; i < buffer_allocations.size(); i++) {
+        allocs_addr.push_back(buffer_allocations.GetDeviceAddress(i));
+      }
+      module_allocations_[executor] = std::move(allocs_addr);
+    } else {
+      for (int i = 0; i < buffer_allocations.size(); i++) {
+        if (module_allocations_[executor][i].IsSameAs(
+                buffer_allocations.GetDeviceAddress(i))) {
+          continue;
+        }
+        module_allocations_[executor][i] =
+            buffer_allocations.GetDeviceAddress(i);
+        VLOG(5) << "Gpu address changed for module " << module_name_
+                << ", allocation info: \n"
+                << allocations[i].ToShortString();
+      }
+    }
+  }
+
   std::set<se::DeviceMemoryBase> buffers_in_result;
 
   const bool is_entire_tuple_contents_aliased = [&] {
@@ -872,7 +909,6 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
     return true;
   }();
 
-  absl::Span<const BufferAllocation> allocations = GetAllocations();
   for (auto& p : result.MutableResult()->buffers()) {
     const ShapeIndex& index = p.first;
     if (!output_info_.contains(index)) {
@@ -972,8 +1008,22 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
     buffers_in_result.insert(result_buffer);
   }
 
-  TF_RETURN_IF_ERROR(ExecuteThunksOrXlaRuntime(run_options, buffer_allocations,
-                                               block_host_until_done));
+  {
+    TF_RETURN_IF_ERROR(
+        CheckCompatibilityWithServiceExecutableRunOptions(run_options));
+
+    ScopedAnnotation annotation([&] { return module_annotations_.top_level; });
+    ScopedModuleAnnotations module_annotations(&module_annotations_);
+
+    ModuleIdentifier unique_id = has_module() ? module().unique_id() : -1;
+    Thunk::ExecutableSource executable_source = {text_, binary_,
+                                                 dnn_compiled_graphs_};
+
+    TF_RETURN_IF_ERROR(ExecuteThunks(
+        has_module() ? &module_config().debug_options() : nullptr, module_name_,
+        unique_id, *thunks_, executable_source, run_options, buffer_allocations,
+        block_host_until_done, execution_stream_ids_, module_annotations_));
+  }
 
   TF_RETURN_IF_ERROR(
       buffer_allocations.TearDown(buffers_in_result, GetAllocations()));
@@ -983,45 +1033,6 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
     MarkToBeReleasedArguments(*args, result);
   }
   return std::move(result);
-}
-
-absl::Status GpuExecutable::ExecuteThunksOrXlaRuntime(
-    const ServiceExecutableRunOptions* run_options,
-    const BufferAllocations& buffer_allocations, bool block_host_until_done) {
-  TF_RETURN_IF_ERROR(
-      CheckCompatibilityWithServiceExecutableRunOptions(run_options));
-
-  ScopedAnnotation annotation([&] { return module_annotations_.top_level; });
-  ScopedModuleAnnotations module_annotations(&module_annotations_);
-
-  ModuleIdentifier unique_id = has_module() ? module().unique_id() : -1;
-
-  if (thunks_) {
-    Thunk::ExecutableSource executable_source = {text_, binary_,
-                                                 dnn_compiled_graphs_};
-    int64_t collective_max_nchannels =
-        has_module() ? module_config()
-                           .debug_options()
-                           .xla_gpu_nccl_collective_max_nchannels()
-                     : 0;
-    int64_t p2p_max_nchannels =
-        has_module()
-            ? module_config().debug_options().xla_gpu_nccl_p2p_max_nchannels()
-            : 0;
-
-    return ExecuteThunks(
-        module_name_, unique_id, *thunks_, executable_source, run_options,
-        buffer_allocations, block_host_until_done,
-        /*use_highest_priority_for_async_stream*/
-        has_module() ? module_config()
-                           .debug_options()
-                           .xla_gpu_enable_highest_priority_async_stream()
-                     : false,
-        execution_stream_ids_, collective_max_nchannels, p2p_max_nchannels,
-        module_annotations_);
-  }
-
-  return FailedPrecondition("Expected XLA gpu executable is not supplied.");
 }
 
 int64_t GpuExecutable::SizeOfGeneratedCodeInBytes() const {
@@ -1037,83 +1048,6 @@ int64_t GpuExecutable::SizeOfGeneratedCodeInBytes() const {
     }
   }
   return size;
-}
-
-absl::Status GpuExecutable::SetUpMlirAllocation(
-    mlir::func::FuncOp func, llvm::ArrayRef<int64_t> buffer_sizes,
-    std::vector<BufferAllocation>* allocations,
-    absl::flat_hash_map<ShapeIndex, GpuExecutable::OutputInfo>* output_info,
-    Shape* output_shape) {
-  for (int i = 0; i < buffer_sizes.size(); i++) {
-    // This code path is taken when using the non-thunk based runtime. Memory
-    // space is being set to 0 for all allocations. We need to copy over the
-    // value from BufferAssignment instead.
-    allocations->emplace_back(i, buffer_sizes[i], /*memory_space=*/0);
-  }
-
-  for (int i = 0; i < func.getNumArguments(); i++) {
-    if (auto param_attr = func.getArgAttr(i, "lmhlo.params")) {
-      xla::ShapeIndex shape_index;
-      if (auto shape_index_attr =
-              func.getArgAttrOfType<mlir::DenseIntElementsAttr>(
-                  i, "lmhlo.param_shape_index")) {
-        for (const llvm::APInt& element : shape_index_attr) {
-          shape_index.push_back(element.getSExtValue());
-        }
-      }
-      allocations->at(i).set_entry_computation_parameter(
-          mlir::cast<mlir::IntegerAttr>(param_attr).getInt(), shape_index,
-          static_cast<bool>(func.getArgAttr(i, "lmhlo.output_index")));
-    }
-    // TODO(timshen): this information is redundant. This is here only for
-    // smooth migration to LMHLO. Remove it.
-    if (func.getArgAttr(i, "lmhlo.constant_name")) {
-      allocations->at(i).set_constant(true);
-    }
-    if (auto output_index_attr = func.getArgAttr(i, "lmhlo.output_index")) {
-      allocations->at(i).set_maybe_live_out(true);
-
-      // Reconstruct a shape index from output_index.
-      ShapeIndex shape_index;
-      for (const llvm::APInt& element :
-           mlir::cast<mlir::DenseIntElementsAttr>(output_index_attr)) {
-        shape_index.push_back(element.getSExtValue());
-      }
-      auto& o = (*output_info)[shape_index];
-      o.allocation_index = i;
-      if (auto param_attr = func.getArgAttr(i, "lmhlo.params")) {
-        HloInputOutputAliasConfig::AliasKind kind =
-            HloInputOutputAliasConfig::kMayAlias;
-        if (func.getArgAttr(i, "lmhlo.must_alias")) {
-          kind = HloInputOutputAliasConfig::kMustAlias;
-        }
-        o.alias_config.emplace(
-            mlir::cast<mlir::IntegerAttr>(param_attr).getInt(), ShapeIndex{},
-            kind);
-      }
-      if (func.getArgument(i).use_empty()) {
-        o.passthrough = true;
-      }
-    }
-  }
-  // Expects result_xla_shape as a XLA shape in string form.
-  //
-  // The attribute is necessary, because GpuExecutable/ExecutionOutput supports
-  // tuples / tree-like shapes, while the LMHLO argument list loses the tree
-  // form.
-  //
-  // The string format is necessary since MLIR doesn't support XLA shape with
-  // dynamic_dimension.
-  //
-  // TODO(timshen): now this field is mandatory. Make it optional for
-  // non-GpuExecutable outputs.
-  TF_ASSIGN_OR_RETURN(
-      *output_shape,
-      ParseShape(func->getAttrOfType<mlir::StringAttr>("result_xla_shape")
-                     .getValue()
-                     .str()));
-
-  return absl::OkStatus();
 }
 
 absl::StatusOr<absl::flat_hash_map<ShapeIndex, GpuExecutable::OutputInfo>>

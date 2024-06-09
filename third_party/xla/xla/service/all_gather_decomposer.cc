@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -31,7 +32,6 @@ limitations under the License.
 #include "xla/service/collective_ops_utils.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/util.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
@@ -108,7 +108,7 @@ absl::Status AllGatherDecomposer::DecomposeAllGather(
     TF_RETURN_IF_ERROR(ag->ReplaceAllUsesWith(ar));
   }
   TF_RETURN_IF_ERROR(comp->RemoveInstructionAndUnusedOperands(ag));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::StatusOr<bool> AllGatherDecomposer::Run(

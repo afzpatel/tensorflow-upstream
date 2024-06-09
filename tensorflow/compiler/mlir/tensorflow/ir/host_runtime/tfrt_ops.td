@@ -87,7 +87,9 @@ Empty strings indicate that they are non-partitioned tensors.}]>:$shape_and_slic
     // VarHandles for restored tensors.
     Variadic<TF_Tensor>:$var_handles,
     // Data types for restored tensor.
-    TypeArrayAttr: $restored_dtypes
+    TypeArrayAttr: $restored_dtypes,
+    // whether trucate is used when casting from the restored_dytpe to the type specified in VarHandle
+    DenseBoolArrayAttr: $truncate_in_cast
   );
 
 }
@@ -100,19 +102,16 @@ def TF_IfrtLoadVariableOp : TF_Op<"IfrtLoadVariable", [Pure]> {
     This op loads a restored variable tensor as a tensor future. It is a
     replacement of `tf.ReadVariableOp`.
 
-    This op returns a scalar string tensor containing the restored variable name, which can be
+    This op returns a scalar string tensor containing the restored variable name, which 
+    is composed from `container_name` and `shared_name` from a `var_handle` and can be
     used as a key within the runtime, as well as a future for the tensor.
 
     The `tf.IfrtCall` kernel uses the output $array_key.
     Other ops executed by TFRT may make use of $tensor_future.
   }];
 
-  // TODO(b/339423851) Redefine the IfrtLoadVariableOp as it doesn't require the
-  // sharding info in the attribute if multihost do not need this info. 
   let arguments = (ins
     Arg<TF_Tensor, [{The variable tensor to be loaded}], []>:$variable,
-    DefaultValuedStrAttr<StrAttr, "">:$device_sharding_config_proto_text,
-    DefaultValuedAttr<StrAttr, "">:$name,
     DefaultValuedAttr<BoolAttr, "false">:$used_by_host
   );
 

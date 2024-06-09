@@ -214,7 +214,7 @@ absl::Status ReadFileTraceMetadata(std::string& filepath, Trace* trace) {
 //
 // Note that each event only appears exactly once, at the first layer it's
 // eligible for.
-tsl::Status DoStoreAsLevelDbTable(
+absl::Status DoStoreAsLevelDbTable(
     std::unique_ptr<tsl::WritableFile>& file, const Trace& trace,
     const std::vector<std::vector<const TraceEvent*>>& events_by_level) {
   tsl::table::Options options;
@@ -267,10 +267,10 @@ tsl::Status DoStoreAsLevelDbTable(
   return file->Close();
 }
 
-tsl::Status DoLoadFromLevelDbTable(
+absl::Status DoLoadFromLevelDbTable(
     const std::string& filename,
     std::unique_ptr<TraceEventsFilterInterface> filter,
-    std::unique_ptr<TraceVisibilityFilter> visibility,
+    std::unique_ptr<TraceVisibilityFilter> visibility_filter,
     int64_t filter_by_visibility_threshold, Trace& trace,
     bool& filter_by_visibility,
     const std::function<TraceEvent*(const TraceEvent&)>& copy_event_to_arena,
@@ -309,13 +309,14 @@ tsl::Status DoLoadFromLevelDbTable(
   filter_by_visibility = filter_by_visibility_threshold == -1LL ||
                          !trace.has_num_events() ||
                          trace.num_events() >= filter_by_visibility_threshold;
-  if (!filter_by_visibility) {
-    visibility.reset();  // disable streaming
-  }
-  if (visibility) {
-    visibility->SetUp(trace);
-    visible_span = visibility->VisibleSpan();
-    container_resolution_ps = visibility->ResolutionPs();
+  if (visibility_filter) {
+    if (!filter_by_visibility) {
+      // disable streaming
+      visibility_filter->UpdateVisibility(0);
+    }
+    visibility_filter->SetUp(trace);
+    visible_span = visibility_filter->VisibleSpan();
+    container_resolution_ps = visibility_filter->ResolutionPs();
   } else {
     visible_span = TraceSpan(trace);
   }
@@ -376,14 +377,14 @@ tsl::Status DoLoadFromLevelDbTable(
             << filtered << " events from LevelDb fast file: " << filename;
   size_t visible_events_count = 0;
   for (TraceEvent* event : loaded_events) {
-    if (!visibility || !visibility->Filter(*event)) {
+    if (!visibility_filter || !visibility_filter->Filter(*event)) {
       add_arena_event(event);
       ++visible_events_count;
     }
   }
   LOG(INFO) << "Added " << visible_events_count
             << " visible events from LevelDb fast file: " << filename;
-  return tsl::OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace profiler

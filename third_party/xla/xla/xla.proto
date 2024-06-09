@@ -115,6 +115,7 @@ message DebugOptions {
   bool xla_cpu_use_mkl_dnn = 97;
 
   reserved 177;  // Was xla_cpu_use_xla_runtime
+  bool xla_cpu_use_thunk_runtime = 298;
 
   reserved 98;  // Was xla_gpu_max_kernel_unroll_factor
 
@@ -404,8 +405,11 @@ message DebugOptions {
   bool xla_gpu_enable_all_gather_combine_by_dim = 254;
   bool xla_gpu_enable_reduce_scatter_combine_by_dim = 257;
 
-  // Combine GPU all-reduces into a single operation over a contiguous buffer.
-  bool xla_gpu_all_reduce_contiguous = 158;
+  // Was xla_gpu_all_reduce_contiguous
+  reserved 158;
+
+  // Split AR across all partitions into logical RS followed by AR.
+  bool xla_gpu_enable_all_reduce_splitter = 299;
 
   // Enable allreduce reassociation on allreduces that are converted to a wider
   // type. The resulting allreduce will be promoted to a wider-typed allreduce.
@@ -423,6 +427,10 @@ message DebugOptions {
 
   // Inflate collective cost by running each collective multiple times.
   int32 xla_gpu_collective_inflation_factor = 205;
+
+  // Whether to force inline before llvm module split to get a more balanced
+  // splits for parallel compilation.
+  bool xla_llvm_force_inline_before_split = 300;
 
   // Whether to use the cuDNN frontend API for convolutions when possible.
   bool xla_gpu_enable_cudnn_frontend = 160;
@@ -479,7 +487,7 @@ message DebugOptions {
 
   // Commands are categorized into 5 types:
   // FUSION represents regular fusion kernels.
-  // CUBLAS, CUDNN, and COLLECTIVES represent library calls.
+  // CUBLAS/CUBLASLT, CUDNN, and COLLECTIVES represent library calls.
   // CONDITIONALS represents control flow.
   enum CommandBufferCmdType {
     INVALID = 0;
@@ -489,6 +497,7 @@ message DebugOptions {
     COLLECTIVES = 4;
     CONDITIONALS = 5;
     CUSTOM_CALL = 6;
+    CUBLASLT = 7;
   }
 
   // Determine the types of commands that are recorded into command buffers.
@@ -521,11 +530,7 @@ message DebugOptions {
 
   reserved 168;  // Was xla_gpu_simplify_all_fp_conversions.
 
-  // An experimental option to force all layouts present in the
-  // after-optimizations HLO to be descending, e.g.
-  // ShapeUtil::MakeShapeWithDescendingLayout is an identity on all
-  // instructions.
-  bool xla_gpu_normalize_layouts = 172;
+  reserved 172;  // Was xla_gpu_normalize_layouts.
 
   // Generate calls to Arm Compute Library in the CPU backend.
   bool xla_cpu_use_acl = 174;
@@ -720,7 +725,16 @@ message DebugOptions {
   // will use for p2p operations.
   int64 xla_gpu_nccl_p2p_max_nchannels = 274;
 
-  bool xla_gpu_enable_mlir_emitters = 275;
+  reserved 275;  // was xla_gpu_enable_mlir_emitters
+
+  // Choose the level of mlir emitters that are enabled.
+  // Current levels:
+  // 0: Disabled.
+  // 1: Loop emitter
+  // 2: + Loop-like emitters
+  // 3: + Transpose
+  // 4: + Reduce
+  int64 xla_gpu_mlir_emitter_level = 303;
   // The maximum number of kernels to emit with MLIR. Unlimited if 0.
   int64 xla_gpu_max_mlir_kernels = 281;
   // The number of initial kernels to not emit with MLIR. Only supported kernels
@@ -781,7 +795,15 @@ message DebugOptions {
   // a deterministic implementation.
   bool xla_gpu_exclude_nondeterministic_ops = 297;
 
-  // Next id: 298
+  // If true, Nccl errors will terminate the process.
+  bool xla_gpu_nccl_terminate_on_error = 301;
+
+  // Use Shardonnay, a new partitioner, to replace the existing
+  // ShardingPropagation and SpmdPartitioner. See go/xla-sdy-pipeline for
+  // details.
+  bool xla_use_shardonnay = 302;
+
+  // Next id: 304
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.

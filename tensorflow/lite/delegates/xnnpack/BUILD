@@ -298,7 +298,7 @@ cc_library(
         "//tensorflow/lite/kernels/internal/utils:sparsity_format_converter",
         "//tensorflow/lite/schema:schema_fbs",
         "//tensorflow/lite/tools/optimize:reduced_precision_support",
-        "@XNNPACK//:XNNPACK_test_mode",
+        "@XNNPACK",
         "@XNNPACK//:experiments_config",
         "@XNNPACK//:logging",
     ],
@@ -2850,9 +2850,6 @@ cc_test(
 cc_test(
     name = "weight_cache_test",
     srcs = ["weight_cache_test.cc"],
-    tags = [
-        "tflite_disable_mobile_test",  # TODO - b/341104412 - enable on Android
-    ],
     deps = [
         ":test_main",
         ":weight_cache",

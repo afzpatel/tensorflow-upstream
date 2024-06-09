@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "xla/tools/multihost_hlo_runner/functional_hlo_runner.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -26,16 +28,28 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/container/btree_map.h"
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "xla/client/executable_build_options.h"
+#include "xla/client/xla_computation.h"
+#include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/layout.h"
 #include "xla/literal.h"
+#include "xla/literal_util.h"
 #include "xla/pjrt/cpu/cpu_client.h"
 #include "xla/pjrt/distributed/client.h"
+#include "xla/pjrt/distributed/distributed.h"
+#include "xla/pjrt/distributed/key_value_store_interface.h"
+#include "xla/pjrt/distributed/service.h"
 #include "xla/pjrt/gpu/se_gpu_pjrt_client.h"
 #include "xla/pjrt/host_memory_spaces.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -43,17 +57,70 @@ limitations under the License.
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_future.h"
 #include "xla/primitive_util.h"
+#include "xla/service/computation_layout.h"
+#include "xla/service/computation_placer.h"
+#include "xla/service/hlo_module_config.h"
 #include "xla/service/hlo_parser.h"
 #include "xla/service/hlo_pass_pipeline.h"
-#include "xla/status.h"
+#include "xla/shape_util.h"
 #include "xla/status_macros.h"
 #include "xla/tests/test_utils.h"
 #include "xla/tools/hlo_control_flow_flattening.h"
+#include "xla/util.h"
 #include "xla/xla.pb.h"
+#include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
+#include "tsl/platform/status.h"
 #include "tsl/platform/statusor.h"
 
 namespace xla {
+
+absl::StatusOr<std::unique_ptr<xla::PjRtClient>> GetPjRtClient(
+    absl::string_view device_type, absl::string_view address, int node_id,
+    int num_nodes, bool enable_mock_nccl,
+    std::unique_ptr<xla::DistributedRuntimeService>& service,
+    std::shared_ptr<xla::KeyValueStoreInterface>& kv_store) {
+  if (device_type == "host") {
+    CHECK_EQ(num_nodes, 1);
+    return xla::FunctionalHloRunner::CreateHostClient();
+  }
+
+  if (device_type != "gpu") {
+    return absl::UnimplementedError(device_type);
+  }
+
+  if (enable_mock_nccl) {
+    CHECK_GT(num_nodes, 1);
+    return xla::FunctionalHloRunner::CreateMockGpuClient(num_nodes);
+  } else {
+    if (num_nodes == 1) {
+      return xla::FunctionalHloRunner::CreateGpuClient();
+    } else {
+      CHECK_GT(address.length(), 0);
+      // Multinode. Start service on task 0.
+      if (node_id == 0) {
+        std::string coordinator_bind_address =
+            "[::]:" + std::string(address).substr(address.rfind(':') + 1);
+        xla::CoordinationServiceImpl::Options options;
+        options.num_nodes = num_nodes;
+        auto status_or = xla::GetDistributedRuntimeService(
+            coordinator_bind_address, options);
+        TF_QCHECK_OK(status_or.status());
+        service = std::move(status_or.value());
+      }
+      xla::DistributedRuntimeClient::Options options;
+      options.node_id = node_id;
+      options.init_timeout = absl::Seconds(300);
+      auto distributed_client =
+          GetDistributedRuntimeClient(std::string(address), options);
+      TF_QCHECK_OK(distributed_client->Connect());
+      kv_store = GetDistributedKeyValueStore(distributed_client,
+                                             /*key_prefix=*/"gpu:");
+      return xla::FunctionalHloRunner::CreateGpuClient(kv_store, node_id,
+                                                       num_nodes);
+    }
+  }
+}
 
 namespace {
 // Creates an HloModule from the given proto.
@@ -82,27 +149,36 @@ void PopulateWithSameValue(Literal* literal, ElementType val) {
 
 absl::StatusOr<Literal> MakeFakeLiteralWithSameValue(const Shape& shape,
                                                      int value) {
-  if (!shape.IsArray()) {
-    return InvalidArgument(
-        "MakeFakeLiteralWithSameValue does not support non-array type");
-  }
-  Shape new_shape = shape;
-  new_shape.mutable_layout()->clear_tiles();
-  return primitive_util::PrimitiveTypeSwitch<absl::StatusOr<Literal>>(
-      [&](auto type) -> absl::StatusOr<Literal> {
-        if constexpr (primitive_util::IsArrayType(type)) {
-          using NativeT = primitive_util::NativeTypeOf<type>;
+  if (shape.IsArray()) {
+    Shape new_shape = shape;
+    new_shape.mutable_layout()->clear_tiles();
+    return primitive_util::PrimitiveTypeSwitch<absl::StatusOr<Literal>>(
+        [&](auto type) -> absl::StatusOr<Literal> {
+          if constexpr (primitive_util::IsArrayType(type)) {
+            using NativeT = primitive_util::NativeTypeOf<type>;
 
-          Literal literal(new_shape);
-          PopulateWithSameValue(
-              &literal,
-              static_cast<NativeT>(type == PRED ? (value % 2) == 0 : value));
-          return literal;
-        }
-        return Unimplemented("Unsupported type for fake literal generation: %s",
-                             ShapeUtil::HumanString(shape));
-      },
-      new_shape.element_type());
+            Literal literal(new_shape);
+            PopulateWithSameValue(
+                &literal,
+                static_cast<NativeT>(type == PRED ? (value % 2) == 0 : value));
+            return literal;
+          }
+          return Unimplemented(
+              "Unsupported type for fake literal generation: %s",
+              ShapeUtil::HumanString(shape));
+        },
+        new_shape.element_type());
+  } else if (shape.IsTuple()) {
+    std::vector<Literal> subliterals;
+    for (const Shape& subshape : shape.tuple_shapes()) {
+      TF_ASSIGN_OR_RETURN(Literal subliteral,
+                          MakeFakeLiteralWithSameValue(subshape, value));
+      subliterals.push_back(std::move(subliteral));
+    }
+    return LiteralUtil::MakeTupleOwned(std::move(subliterals));
+  }
+  return InvalidArgument("Unsupported type for fake literal generation: %s",
+                         ShapeUtil::HumanString(shape));
 }
 
 }  // namespace
@@ -268,20 +344,19 @@ FunctionalHloRunner::CreateMockGpuClient(int num_nodes) {
 
 absl::StatusOr<std::unique_ptr<PjRtClient>>
 FunctionalHloRunner::CreateGpuClient(
-    std::shared_ptr<xla::DistributedRuntimeClient> distributed_client,
-    int node_id, int num_nodes) {
+    std::shared_ptr<xla::KeyValueStoreInterface> kv_store, int node_id,
+    int num_nodes) {
   if (node_id < 0 || node_id >= num_nodes) {
     return absl::InvalidArgumentError(
         "Node id is expected to be in range [0, num_nodes)");
   }
 
-  TF_RET_CHECK(distributed_client != nullptr);
+  TF_RET_CHECK(kv_store != nullptr);
 
   GpuClientOptions options;
   options.node_id = node_id;
   options.num_nodes = num_nodes;
-  options.kv_store =
-      GetDistributedKeyValueStore(distributed_client, /*key_prefix=*/"gpu:");
+  options.kv_store = kv_store;
   return GetStreamExecutorGpuClient(options);
 }
 
@@ -295,7 +370,8 @@ absl::StatusOr<ExecutionOptions> FunctionalHloRunner::LoadExecutionOptions(
 
 absl::StatusOr<CompileOptions> FunctionalHloRunner::CreateCompileOptions(
     const PjRtClient& client,
-    const FunctionalHloRunner::RawCompileOptions& raw_options, int task_id) {
+    const FunctionalHloRunner::RawCompileOptions& raw_options, int task_id,
+    int num_nodes, std::shared_ptr<xla::KeyValueStoreInterface> kv_store) {
   CompileOptions compile_options;
   if (raw_options.execution_options.has_value()) {
     compile_options.executable_build_options =
@@ -312,6 +388,9 @@ absl::StatusOr<CompileOptions> FunctionalHloRunner::CreateCompileOptions(
           raw_options.num_slices.value_or(1));
   build_options.set_num_replicas(replicas_and_partitions.replicas);
   build_options.set_num_partitions(replicas_and_partitions.partitions);
+  build_options.set_process_index(task_id);
+  build_options.set_process_count(num_nodes);
+  build_options.set_key_value_store(kv_store);
   if (raw_options.spmd_mode == SpmdMode::kUseSpmdPartitioning) {
     build_options.set_use_spmd_partitioning(true);
   }
@@ -493,16 +572,18 @@ absl::Status FunctionalHloRunner::LoadAndRunAndDump(
     const xla::FunctionalHloRunner::PreprocessingOptions& preproc_options,
     const xla::FunctionalHloRunner::RawCompileOptions& raw_compile_options,
     const xla::FunctionalHloRunner::RunningOptions& running_options,
-    absl::Span<const std::string> hlo_files, InputFormat input_format,
-    std::string dump_output_to, int task_id) {
-  TF_ASSIGN_OR_RETURN(CompileOptions compile_options,
-                      FunctionalHloRunner::CreateCompileOptions(
-                          client, raw_compile_options, task_id));
+    absl::string_view hlo_text, InputFormat input_format,
+    std::string dump_output_to, int task_id, int num_nodes,
+    std::shared_ptr<xla::KeyValueStoreInterface> kv_store) {
+  TF_ASSIGN_OR_RETURN(
+      CompileOptions compile_options,
+      FunctionalHloRunner::CreateCompileOptions(client, raw_compile_options,
+                                                task_id, num_nodes, kv_store));
   TF_ASSIGN_OR_RETURN(
       FunctionalHloRunner::PerDeviceLiteralVecType output,
       FunctionalHloRunner::LoadAndRun(client, debug_options, preproc_options,
                                       compile_options, running_options,
-                                      hlo_files, input_format));
+                                      hlo_text, input_format));
   return dump_output_to.empty()
              ? absl::OkStatus()
              : FunctionalHloRunner::DumpOutput(output, dump_output_to, task_id);
@@ -514,7 +595,7 @@ FunctionalHloRunner::LoadAndRun(PjRtClient& client,
                                 const PreprocessingOptions& preproc_options,
                                 const CompileOptions& compile_options,
                                 const RunningOptions& running_options,
-                                absl::Span<const std::string> hlo_files,
+                                absl::string_view hlo_text,
                                 InputFormat input_format,
                                 const PerDeviceLiteralVecType& arguments) {
   // We only support SPMD as of now, i.e., all devices are supposed
@@ -524,14 +605,11 @@ FunctionalHloRunner::LoadAndRun(PjRtClient& client,
   // replay the original execution.
   HloModuleAndArguments hlo_module_and_arguments;
   PerDeviceLiteralVecType loaded_arguments;
-  for (int i = 0; i < hlo_files.size(); ++i) {
-    TF_ASSIGN_OR_RETURN(hlo_module_and_arguments,
-                        LoadHloModuleAndArguments(hlo_files[i], input_format));
-    if (input_format == InputFormat::kSnapshotProtoBinary) {
-      CHECK_GE(client.devices().size(), hlo_files.size());
-      loaded_arguments[client.devices()[i]->id()] =
-          std::move(hlo_module_and_arguments.arguments);
-    }
+  TF_ASSIGN_OR_RETURN(hlo_module_and_arguments,
+                      LoadHloModuleAndArguments(hlo_text, input_format));
+  if (input_format == InputFormat::kSnapshotProtoBinary) {
+    loaded_arguments[client.devices()[0]->id()] =
+        std::move(hlo_module_and_arguments.arguments);
   }
   if (!arguments.empty()) {
     return CompileAndRun(client, debug_options, preproc_options,
@@ -547,10 +625,12 @@ absl::Status FunctionalHloRunner::LoadAndCompile(
     PjRtClient& client, const DebugOptions& debug_options,
     const PreprocessingOptions& preproc_options,
     const RawCompileOptions& raw_compile_options, std::string_view hlo_file,
-    InputFormat input_format, int task_id) {
-  TF_ASSIGN_OR_RETURN(CompileOptions compile_options,
-                      FunctionalHloRunner::CreateCompileOptions(
-                          client, raw_compile_options, task_id));
+    InputFormat input_format, int task_id, int num_nodes,
+    std::shared_ptr<xla::KeyValueStoreInterface> kv_store) {
+  TF_ASSIGN_OR_RETURN(
+      CompileOptions compile_options,
+      FunctionalHloRunner::CreateCompileOptions(client, raw_compile_options,
+                                                task_id, num_nodes, kv_store));
 
   int num_replicas = compile_options.executable_build_options.num_replicas();
   int num_partitions =
@@ -797,8 +877,6 @@ absl::StatusOr<std::unique_ptr<PjRtExecutable>> FunctionalHloRunner::Compile(
 }
 
 // Runs the executable and may repeat for multiple times.
-// Since the input buffers may be donated by the PjrtClient, we re-create the
-// input PjrtBuffers for each repetition.
 absl::StatusOr<FunctionalHloRunner::PerDeviceLiteralVecType>
 FunctionalHloRunner::Run(PjRtClient& client, PjRtLoadedExecutable* executable,
 
@@ -931,15 +1009,15 @@ FunctionalHloRunner::RunInternal(
   if (running_options.multi_slice_config != nullptr) {
     execute_options.multi_slice_config = running_options.multi_slice_config;
   }
+  if (running_options.untuple_result.has_value()) {
+    execute_options.untuple_result = *running_options.untuple_result;
+  }
   TF_ASSIGN_OR_RETURN(std::vector<std::shared_ptr<HloModule>> hlo_modules,
                       executable->GetHloModules());
   CHECK_EQ(hlo_modules.size(), 1);
   const HloModule& module = *(hlo_modules.front());
   ParameterType parameter_type = GetParameterType(module);
   bool flatten_arguments = parameter_type == ParameterType::kOneTupleOfArrays;
-  TF_ASSIGN_OR_RETURN(
-      std::vector<std::vector<std::unique_ptr<PjRtBuffer>>> device_buffers,
-      create_argument_buffers_on_device(flatten_arguments));
   auto get_output_index_for_one_tuple_of_arrays =
       [&module](int64_t parameter_index) -> std::optional<int64_t> {
     const HloInputOutputAliasConfig& alias_config =
@@ -974,8 +1052,6 @@ FunctionalHloRunner::RunInternal(
   };
 
   std::vector<std::vector<std::unique_ptr<PjRtBuffer>>> output_buffers;
-  std::vector<std::vector<PjRtBuffer*>> argument_ptrs =
-      CreateArgumentPointersFromDeviceBuffers(device_buffers);
   auto output_has_tuple_leaf_on_host_memory_space = [&module]() {
     if (!module.result_shape().IsTuple()) {
       return false;
@@ -1011,9 +1087,19 @@ FunctionalHloRunner::RunInternal(
   }
   std::optional<std::vector<PjRtFuture<>>> futures;
   futures.emplace();
+  std::vector<std::vector<std::unique_ptr<PjRtBuffer>>> device_buffers;
+  std::vector<std::vector<PjRtBuffer*>> argument_ptrs;
   for (int repeat = 0; repeat < running_options.num_repeats; ++repeat) {
     VLOG(1) << "FunctionalHloRunner: ExecuteOnDevices started (repeat = "
             << repeat << ").";
+    if (repeat == 0 || running_options.recreate_buffers_between_repeats) {
+      VLOG(1) << "Creating argument buffers. repeat = " << repeat;
+      device_buffers.clear();
+      argument_ptrs.clear();
+      TF_ASSIGN_OR_RETURN(device_buffers,
+                          create_argument_buffers_on_device(flatten_arguments));
+      argument_ptrs = CreateArgumentPointersFromDeviceBuffers(device_buffers);
+    }
     if (repeat == running_options.num_repeats - 1) {
       execute_options.untuple_result = default_untuple_result;
       if (running_options.profiler != nullptr) {

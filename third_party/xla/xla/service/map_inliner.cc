@@ -18,17 +18,18 @@ limitations under the License.
 #include <memory>
 #include <string>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/utils/hlo_query.h"
-#include "xla/status_macros.h"
-#include "xla/types.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
-#include "tsl/platform/status.h"
+#include "tsl/platform/statusor.h"
 
 namespace xla {
 
@@ -40,7 +41,7 @@ class MapInlinerVisitor : public DfsHloVisitorWithDefault {
 
   // Default visitor action is to do nothing and return OK.
   absl::Status DefaultAction(HloInstruction* /*hlo_instruction*/) override {
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   absl::Status HandleMap(HloInstruction* map) override;
@@ -71,7 +72,7 @@ absl::Status MapInlinerVisitor::HandleMap(HloInstruction* map) {
   if (hlo_query::AllOperandsAreParameters(root)) {
     if (root.opcode() == HloOpcode::kFusion) {
       // Cloning not supported for these instructions.
-      return OkStatus();
+      return absl::OkStatus();
     }
     VLOG(10) << "inlining map({X ... Y}, op) => : op(X ... Y) with function "
              << root.ToShortString();
@@ -104,10 +105,10 @@ absl::Status MapInlinerVisitor::HandleMap(HloInstruction* map) {
           computation_->ReplaceInstruction(map, placed_instruction));
     }
     changed_ = true;
-    return OkStatus();
+    return absl::OkStatus();
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::StatusOr<bool> MapInliner::Run(

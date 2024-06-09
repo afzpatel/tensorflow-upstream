@@ -15,9 +15,9 @@ limitations under the License.
 
 #include "xla/service/reshape_decomposer.h"
 
+#include "absl/status/status.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "xla/service/hlo_creation_utils.h"
-#include "xla/status.h"
 
 namespace xla {
 
@@ -66,7 +66,7 @@ class ReshapeDecomposerVisitor : public DfsHloRewriteVisitor {
       auto c2 = MakeCopyHlo(b, s);
       TF_RETURN_IF_ERROR(ReplaceInstruction(reshape, c2));
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 };
 

@@ -36,7 +36,6 @@ cc_library(
         "GOOGLE_CUDA=1",
     ]) + if_rocm_is_configured(["TENSORFLOW_USE_ROCM=1"]),
     deps = [
-        "//xla:status",
         "//xla:status_macros",
         "//xla:statusor",
         "//xla:types",
@@ -105,7 +104,6 @@ xla_cc_test(
         "//xla/tests:xla_internal_test_main",
         "@llvm-project//llvm:Core",
         "@local_tsl//tsl/platform:path",
-        "@local_tsl//tsl/platform:resource_loader",
         "@local_tsl//tsl/platform:test",
     ],
 )

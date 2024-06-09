@@ -29,6 +29,7 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/container/node_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -45,7 +46,6 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_layout.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/statusor.h"
 #include "xla/types.h"
 #include "xla/util.h"
@@ -473,7 +473,7 @@ class LayoutAssignment : public HloModulePass {
   // Called after layouts of an instruction have been finalized to allow
   // subclasses to check for platform specific assumptions.
   virtual absl::Status Verify(const HloInstruction* instruction) {
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   absl::Status PropagateUnconstraintedBuffers(LayoutConstraints* constraints);
@@ -581,7 +581,7 @@ class LayoutAssignment : public HloModulePass {
   // all mandatory constraints have been added via AddMandatoryConstraints
   // and before propagating constraints.
   virtual absl::Status AddBackendConstraints(LayoutConstraints* constraints) {
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   // Construct constraints and assign layouts to all instructions in the

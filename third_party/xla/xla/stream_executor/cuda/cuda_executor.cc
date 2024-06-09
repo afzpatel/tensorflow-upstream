@@ -60,6 +60,7 @@ limitations under the License.
 #include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/cuda/cuda_diagnostics.h"
 #include "xla/stream_executor/cuda/cuda_driver.h"
+#include "xla/stream_executor/cuda/cuda_event.h"
 #include "xla/stream_executor/cuda/cuda_platform_id.h"
 #include "xla/stream_executor/gpu/gpu_collectives.h"
 #include "xla/stream_executor/gpu/gpu_command_buffer.h"
@@ -77,7 +78,6 @@ limitations under the License.
 #include "xla/stream_executor/plugin_registry.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "xla/stream_executor/stream_executor_interface.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/fingerprint.h"
@@ -106,7 +106,7 @@ namespace gpu {
 
 static GpuEvent* AsGpuEvent(Event* event) {
   DCHECK(event != nullptr);
-  return static_cast<GpuEvent*>(event->implementation());
+  return static_cast<GpuEvent*>(event);
 }
 
 // Given const GPU memory, returns a libcuda device pointer datatype, suitable
@@ -758,10 +758,6 @@ bool GpuExecutor::HostCallback(Stream* stream,
   delete callback;
 }
 
-absl::Status GpuExecutor::DeallocateEvent(Event* event) {
-  return AsGpuEvent(event)->Destroy();
-}
-
 absl::Status GpuExecutor::RecordEvent(Stream* stream, Event* event) {
   return AsGpuEvent(event)->Record(AsGpuStream(stream));
 }
@@ -774,22 +770,6 @@ absl::Status GpuExecutor::WaitForEvent(Stream* stream, Event* event) {
     return absl::InternalError(absl::StrFormat(
         "error recording waiting for CUDA event on stream %p", stream));
   }
-}
-
-absl::Status GpuExecutor::WaitForEventOnExternalStream(std::intptr_t stream,
-                                                       Event* event) {
-  if (GpuDriver::WaitStreamOnEvent(context_,
-                                   absl::bit_cast<GpuStreamHandle>(stream),
-                                   AsGpuEvent(event)->gpu_event())) {
-    return absl::OkStatus();
-  } else {
-    return absl::InternalError(
-        "error waiting for CUDA event on external stream");
-  }
-}
-
-Event::Status GpuExecutor::PollForEventStatus(Event* event) {
-  return AsGpuEvent(event)->PollForStatus();
 }
 
 void GpuExecutor::DeallocateStream(Stream* stream) {
@@ -888,12 +868,12 @@ fft::FftSupport* GpuExecutor::AsFft() {
   return fft_.get();
 }
 
-bool GpuExecutor::CanEnablePeerAccessTo(StreamExecutorInterface* other) {
+bool GpuExecutor::CanEnablePeerAccessTo(StreamExecutor* other) {
   GpuExecutor* cuda_other = static_cast<GpuExecutor*>(other);
   return GpuDriver::CanEnablePeerAccess(context_, cuda_other->context_);
 }
 
-absl::Status GpuExecutor::EnablePeerAccessTo(StreamExecutorInterface* other) {
+absl::Status GpuExecutor::EnablePeerAccessTo(StreamExecutor* other) {
   GpuExecutor* cuda_other = static_cast<GpuExecutor*>(other);
   return GpuDriver::EnablePeerAccess(context_, cuda_other->context_);
 }
@@ -906,26 +886,21 @@ absl::StatusOr<DeviceMemoryBase> GpuExecutor::GetSymbol(
     const std::string& symbol_name, ModuleHandle module_handle) {
   void* mem = nullptr;
   size_t bytes = 0;
-
   CHECK(static_cast<bool>(module_handle));
-
-  auto lookup_in_module = [&](CUmodule module) {
-    CHECK(module != nullptr);
-    return GpuDriver::GetModuleSymbol(context_, module, symbol_name.c_str(),
-                                      reinterpret_cast<CUdeviceptr*>(&mem),
-                                      &bytes);
-  };
 
   {  // give limited scope to mutex_lock
     absl::MutexLock lock{&in_memory_modules_mu_};
     auto it = gpu_binary_to_module_.find(module_handle.id());
     CHECK(it != gpu_binary_to_module_.end());
-    if (lookup_in_module(it->second.first)) {
-      return DeviceMemoryBase(mem, bytes);
-    }
+
+    GpuModuleHandle gpu_module_handle = it->second.first;
+    CHECK(gpu_module_handle != nullptr);
+    TF_RETURN_IF_ERROR(GpuDriver::GetModuleSymbol(
+        context_, gpu_module_handle, symbol_name.c_str(),
+        reinterpret_cast<CUdeviceptr*>(&mem), &bytes));
+    return DeviceMemoryBase(mem, bytes);
   }
 
-  LOG(INFO) << "Failed to find symbol: " << symbol_name;
   return absl::NotFoundError(
       absl::StrCat("Check if module containing symbol ", symbol_name,
                    " is loaded (module_handle = ",
@@ -947,9 +922,9 @@ absl::Status FillBlockDimLimit(GpuDeviceHandle device,
 }
 
 absl::StatusOr<std::unique_ptr<Event>> GpuExecutor::CreateEvent() {
-  auto gpu_event = std::make_unique<GpuEvent>(this);
+  auto gpu_event = std::make_unique<CudaEvent>(this);
   TF_RETURN_IF_ERROR(gpu_event->Init());
-  return std::make_unique<Event>(this, std::move(gpu_event));
+  return std::move(gpu_event);
 }
 
 absl::StatusOr<std::unique_ptr<Stream>> GpuExecutor::CreateStream(
@@ -966,9 +941,8 @@ absl::StatusOr<std::unique_ptr<Stream>> GpuExecutor::CreateStream(
   bool init_worked = gpu_stream->Init();
   if (init_worked) {
     auto platform_specific_stream = gpu_stream->platform_specific_stream();
-    auto stream = std::make_unique<Stream>(this, std::move(gpu_stream));
-    alive_gpu_streams_[platform_specific_stream] = stream.get();
-    return std::move(stream);
+    alive_gpu_streams_[platform_specific_stream] = gpu_stream.get();
+    return std::move(gpu_stream);
   } else {
     return absl::InvalidArgumentError("Failed to initialize gpu stream");
   }

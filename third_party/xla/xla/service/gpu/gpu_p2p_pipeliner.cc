@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -30,7 +31,6 @@ limitations under the License.
 #include "xla/service/collective_pipeliner.h"
 #include "xla/service/hlo_parser.h"
 #include "xla/service/hlo_pass_pipeline.h"
-#include "xla/status.h"
 #include "xla/util.h"
 
 namespace xla {
@@ -91,7 +91,7 @@ absl::Status PostprocessP2PImpl(
       instr->frontend_attributes().map().find(kSendRecvValidationAttr);
   if (validation_it == instr->frontend_attributes().map().end() ||
       validation_it->second == "invalid") {
-    return OkStatus();
+    return absl::OkStatus();
   }
   auto statusor_bounds = ParseReplicaGroupsOnly(validation_it->second);
   if (!statusor_bounds.ok()) {
@@ -101,7 +101,7 @@ absl::Status PostprocessP2PImpl(
   xla::FrontendAttributes attributes = instr->frontend_attributes();
   (*attributes.mutable_map())[kSendRecvValidationAttr] = validation_attr;
   instr->set_frontend_attributes(attributes);
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Modifies the loop iteration frontend attribute for the peeled off Send and

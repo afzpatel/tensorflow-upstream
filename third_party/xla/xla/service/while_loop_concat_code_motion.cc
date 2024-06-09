@@ -22,6 +22,7 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -34,7 +35,6 @@ limitations under the License.
 #include "xla/service/tuple_simplifier.h"
 #include "xla/service/while_loop_simplifier.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/status_macros.h"
 #include "xla/statusor.h"
 #include "xla/util.h"
@@ -688,7 +688,7 @@ absl::Status AddCopiesToRoot(HloComputation* body,
                               param_group.inserted_concat_dim))
               .first);
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status RemoveCopiesFromRoot(HloComputation* body) {
@@ -700,7 +700,7 @@ absl::Status RemoveCopiesFromRoot(HloComputation* body) {
       TF_RETURN_IF_ERROR(root->ReplaceOperandWith(i, copy->mutable_operand(0)));
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status RewriteLoopWithConcatGroups(
@@ -941,7 +941,7 @@ absl::Status RewriteLoopWithConcatGroups(
     TF_RETURN_IF_ERROR(slice->ReplaceAllUsesWith(slice->mutable_operand(0)));
     TF_RETURN_IF_ERROR(body->RemoveInstruction(slice));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::StatusOr<bool> RunOnLoop(HloInstruction* loop,

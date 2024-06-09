@@ -35,6 +35,7 @@ limitations under the License.
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
@@ -54,7 +55,6 @@ limitations under the License.
 #include "xla/service/logical_buffer.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/status_macros.h"
 #include "xla/util.h"
 #include "tsl/platform/errors.h"
@@ -968,7 +968,7 @@ absl::Status MemoryUsageTracker::CountFreedMemory(Item* item) {
       // free up the parameter space and reuse it for other tensors.
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status MemoryUsageTracker::BeginInstruction(Item* item) {
@@ -990,7 +990,7 @@ absl::Status MemoryUsageTracker::BeginInstruction(Item* item) {
   if (VLOG_IS_ON(1)) {
     DCHECK(Check());
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status MemoryUsageTracker::EndInstruction() {
@@ -1007,7 +1007,7 @@ absl::Status MemoryUsageTracker::EndInstruction() {
   if (VLOG_IS_ON(1)) {
     DCHECK(Check());
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 int64_t MemoryUsageTracker::MemoryReducedIfCompressed(
@@ -1183,7 +1183,7 @@ absl::Status MemoryUsageTracker::AddCompressInstructions(
   // original buffer with the newly created final buffer.
   ReplaceUsesInUsersOfBuffer(uncompressed_buffer, original_buffer_id);
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status MemoryUsageTracker::AddRematerializedInstruction(
@@ -1328,7 +1328,7 @@ absl::Status MemoryUsageTracker::AddRematerializedInstruction(
 
   DCHECK(Check());
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status MemoryUsageTracker::AddHostOffloadCopyInstructions(
@@ -1471,7 +1471,7 @@ absl::Status MemoryUsageTracker::AddHostOffloadCopyInstructions(
     }
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 std::string MemoryUsageTracker::ToString() const {
@@ -2887,7 +2887,8 @@ absl::StatusOr<bool> HloRematerialization::Run(
       async_threads.insert(computation->execution_thread());
     }
     TF_RETURN_IF_ERROR(call_graph_->VisitNodes(
-        [this, module, &async_threads](const CallGraphNode& node) -> Status {
+        [this, module,
+         &async_threads](const CallGraphNode& node) -> absl::Status {
           auto callee_thread = node.computation()->execution_thread();
           if (node.context() == CallContext::kControlFlow &&
               HloInstruction::IsThreadIncluded(callee_thread, async_threads)) {
@@ -2897,7 +2898,7 @@ absl::StatusOr<bool> HloRematerialization::Run(
                                                       node.computation()),
                                                   {callee_thread}));
           }
-          return OkStatus();
+          return absl::OkStatus();
         },
         /*visit_unreachable_nodes=*/false));
 
@@ -2937,7 +2938,7 @@ absl::StatusOr<bool> HloRematerialization::Run(
                                 module->schedule().sequence(node.computation()),
                                 execution_threads));
         }
-        return OkStatus();
+        return absl::OkStatus();
       },
       /*visit_unreachable_nodes=*/false));
 

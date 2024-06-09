@@ -461,8 +461,6 @@ def IfrtLoadVariableOp: TensorflowMlrt_Op<"ifrt_load_variable", [Pure]> {
 
   let arguments = (ins
     TFTensorType:$variable,
-    StrAttr:$device_sharding_config_proto_text,
-    StrAttr:$name,
     DefaultValuedAttr<BoolAttr, "false">:$used_by_host
   );
 
@@ -495,7 +493,8 @@ def IfrtRestoreVariableOp: TensorflowMlrt_Op<"ifrt_restore_variable", []> {
     TFTensorType:$tensor_names,
     TFTensorType:$shape_and_slices,
     Variadic<TFTensorType>:$var_handles,
-    TypeArrayAttr: $restored_dtypes
+    TypeArrayAttr: $restored_dtypes,
+    DenseBoolArrayAttr: $truncate_in_cast
   );
 }
 

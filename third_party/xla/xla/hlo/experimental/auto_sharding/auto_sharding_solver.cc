@@ -38,12 +38,12 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_memory.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_strategy.h"
-#include "xla/status.h"
 #include "xla/status_macros.h"
 #include "xla/util.h"
 #include "tsl/platform/fingerprint.h"
@@ -1268,7 +1268,7 @@ absl::Status ValidateRequest(const AutoShardingSolverRequest& request) {
     const int num_v_strategies = request.computation_costs(v).costs_size();
     CHECK_EQ(num_strategies, num_u_strategies * num_v_strategies);
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace spmd

@@ -69,7 +69,6 @@ limitations under the License.
 #include "tsl/platform/statusor.h"
 #include "tsl/protobuf/dnn.pb.h"
 
-
 namespace xla {
 namespace gpu {
 namespace {
@@ -184,84 +183,127 @@ absl::StatusOr<HloInstruction *> InvertAndConvertScalar(HloInstruction *scalar,
   return scalar;
 }
 
-// Recursively collects unary, divide, dynamic-slice, pad, multiply or select
-// operands of instr and the index of the operand identifying the next op in the
-// sequence until an instruction with FP8 element type is reached. Returns an
-// empty vector when no FP8 instruction is reached.
-std::vector<std::pair<HloInstruction *, int>> FindF8SubgraphRecursive(
-    HloInstruction *instr, absl::flat_hash_set<int> &visited_instrs,
-    std::vector<std::pair<HloInstruction *, int>> subgraph) {
+// A path of instructions by traversing downwards through users, as (op,
+// operand_index) pairs. operand_index is the index to get to the previous
+// element in the path. I.e.,
+// path[i].first->operand(path[i].second) == path[i-1].first
+using InstrPath = std::vector<std::pair<HloInstruction *, int>>;
+
+// From 'instr', recursively traverses operands until an FP8 instruction is
+// encountered. Only unary ops and a few types of non-unary ops are traversed.
+// If an FP8 instruction is found, returns the path from the FP8 instruction to
+// 'instr'. Returns nullopt when no FP8 instruction is reached.
+//
+// The intent is, given 'instr' is the operand of a dot, to find a sequence of
+// instruction that can potentially be fused into a cuBLAS LT FP8 gemm.
+std::optional<InstrPath> FindF8SubgraphRecursive(
+    HloInstruction *instr, absl::flat_hash_set<int> &visited_instrs) {
   // Avoid visiting the same instruction more than once.
   if (!visited_instrs.emplace(instr->unique_id()).second) {
-    return {};
+    return std::nullopt;
   }
-  subgraph.emplace_back(std::make_pair(instr, 0));
   if (IsF8Type(instr)) {
-    return subgraph;
+    // The initial operand index is meaningless. Arbitrarily use -1.
+    return InstrPath{{instr, -1}};
   }
   if (instr->operand_count() == 1 || instr->opcode() == HloOpcode::kDivide ||
       instr->opcode() == HloOpcode::kDynamicSlice ||
       instr->opcode() == HloOpcode::kPad) {
-    return FindF8SubgraphRecursive(instr->mutable_operand(0), visited_instrs,
-                                   std::move(subgraph));
+    std::optional<InstrPath> subgraph =
+        FindF8SubgraphRecursive(instr->mutable_operand(0), visited_instrs);
+    if (subgraph) {
+      subgraph->emplace_back(std::make_pair(instr, 0));
+    }
+    return subgraph;
   } else if (instr->opcode() == HloOpcode::kMultiply ||
              instr->opcode() == HloOpcode::kSelect) {
     for (int k = 0; k < 2; ++k) {
       // Iterate over operands 0 and 1 for multiply and operands 1 and 2 for
       // select.
       int operand_idx = k + (instr->opcode() == HloOpcode::kSelect);
-      subgraph.back().second = operand_idx;
-      auto binary_subgraph = FindF8SubgraphRecursive(
-          instr->mutable_operand(operand_idx), visited_instrs, subgraph);
-      if (!binary_subgraph.empty()) {
-        return binary_subgraph;
+      std::optional<InstrPath> subgraph = FindF8SubgraphRecursive(
+          instr->mutable_operand(operand_idx), visited_instrs);
+      if (subgraph) {
+        subgraph->emplace_back(std::make_pair(instr, operand_idx));
+        return subgraph;
       }
     }
   }
-  return {};
+  return std::nullopt;
 }
 
-// Returns whether instr and its operands describe a pattern which is compatible
-// with rewriting the dot operating on instr into an FP8 Custom Call. If
-// applicable, captures the operand of the Custom Call, its scaling factor,
-// whether the scaling factor is applied by multiplication and intermediate
-// unary ops.
-bool IsSupportedF8Pattern(
-    HloInstruction *instr, HloInstruction *&x, HloInstruction *&x_scale,
-    bool &x_mult_scale, std::vector<std::pair<HloInstruction *, int>> &x_ops) {
-  absl::flat_hash_set<int> visited_instrs;
-  std::vector<std::pair<HloInstruction *, int>> subgraph =
-      FindF8SubgraphRecursive(instr, visited_instrs,
-                              std::vector<std::pair<HloInstruction *, int>>{});
+// Contains information on a parameter (either the LHS or RHS) for a
+// gemm that can be potentially pattern-matched into an FP8 cublasLT gemm.
+struct MatchedFp8Param {
+  // The FP8 input to the gemm.
+  HloInstruction *fp8_input = nullptr;
+  // If nonnull, the scale for the 'x'
+  HloInstruction *scale = nullptr;
+  // Whether the scale, if present, multiplies or divides 'x'
+  bool mult_scale = false;
+  // A list of instructions from x to the dot instruction commutative with
+  // dequantization. Such instructions can be moved before the FP8 gemm.
+  InstrPath commutative_ops;
+};
 
-  if (subgraph.empty()) {
-    return false;
+// Given an operand of a dot, `instr`, returns a MatchedFp8Param if this operand
+// allows rewriting the dot in an FP8 cublasLT custom call, optionally with
+// scaling. In particular, returns an MatchedFp8Param if either 'instr' is FP8
+// or there is a there is a path from an FP8 instruction 'fp8_input' to 'instr'
+// consisting of the following.
+// 1. A convert to a wider type.
+// 2. Optionally, a multiplication/division by a scalar, representing the scale.
+//    If present, the scalar scale is returned as 'scale' and 'mult_scale'
+//    is set to true or false depending on whether there is a multiplication or
+//    a division.
+// 3. A possibly-empty set of ops communative with steps (1) and (2), meaning
+//    they can be safely moved before step (1). Such ops are returned in
+//    'commutative_ops'.
+// Steps (1) and (2) together are a dequantization, and can be fused into a
+// cublas LT matmul. Step (3) can be moved before the cublas LT matmul.
+std::optional<MatchedFp8Param> MatchFp8Param(HloInstruction *instr) {
+  absl::flat_hash_set<int> visited_instrs;
+  std::optional<InstrPath> maybe_subgraph =
+      FindF8SubgraphRecursive(instr, visited_instrs);
+  if (!maybe_subgraph) {
+    return std::nullopt;
   }
+  InstrPath &subgraph = maybe_subgraph.value();
+
+  MatchedFp8Param param;
 
   // Directly operating on an FP8 operand.
   if (subgraph.size() == 1) {
-    x = subgraph[0].first;
-    return true;
+    CHECK(IsF8Type(subgraph[0].first));
+    param.fp8_input = subgraph[0].first;
+    return param;
   }
 
-  std::reverse(subgraph.begin(), subgraph.end());
+  int num_dequant_ops;
   // When not operating directly on an FP8 operand, the second and
-  // third instructions in the subgraph must describe a dequantization, i.e. a
+  // third instructions in the subgraph can describe a dequantization, i.e. a
   // convert instruction followed by a multiply/divide instruction.
   if (subgraph.size() > 2 &&
       Match(subgraph[2].first,
-            m::MultiplyAnyOrder(m::Convert(m::Op(&x)),
-                                m::Broadcast(m::Op(&x_scale))))) {
-    x_mult_scale = true;
+            m::MultiplyAnyOrder(m::Convert(m::Op(&param.fp8_input)),
+                                m::Broadcast(m::Op(&param.scale))))) {
+    param.mult_scale = true;
+    num_dequant_ops = 2;
   } else if (subgraph.size() > 2 &&
              Match(subgraph[2].first,
-                   m::Divide(m::Convert(m::Op(&x)),
-                             m::Broadcast(m::Op(&x_scale))))) {
-    x_mult_scale = false;
+                   m::Divide(m::Convert(m::Op(&param.fp8_input)),
+                             m::Broadcast(m::Op(&param.scale))))) {
+    param.mult_scale = false;
+    num_dequant_ops = 2;
+  } else if (subgraph.size() > 1 &&
+             Match(subgraph[1].first, m::Convert(m::Op(&param.fp8_input)))) {
+    // We have a convert from FP8 without a scale in this case.
+    param.scale = nullptr;
+    num_dequant_ops = 1;
   } else {
     VLOG(1) << "Possible intended FP8 GEMM operating on "
             << instr->ToShortString() << " not rewritten into FP8 Custom Call.";
-    return false;
+    return std::nullopt;
   }
 
   auto preserves_element_type = [](const HloInstruction *instr) -> bool {
@@ -272,7 +314,9 @@ bool IsSupportedF8Pattern(
     return instr->GetModule()->config().use_spmd_partitioning();
   };
 
-  for (int i = 3; i < subgraph.size(); ++i) {
+  // Skip the initial FP8 instruction and the dequantization instructions.
+  int start = 1 + num_dequant_ops;
+  for (int i = start; i < subgraph.size(); ++i) {
     // The remaining instructions must be commutative with dequantization.
     // Bitcast, broadcast, copy, dynamic-slice, pad, reshape, select, slice,
     // transpose, all-gather, all-to-all and collective-permute instructions are
@@ -292,7 +336,7 @@ bool IsSupportedF8Pattern(
       VLOG(1) << "Possible intended FP8 GEMM operating on "
               << instr->ToShortString()
               << " not rewritten into FP8 Custom Call.";
-      return false;
+      return std::nullopt;
     }
     // One of the operands of select must be zero for the op to be commutative
     // with dequantization.
@@ -303,12 +347,12 @@ bool IsSupportedF8Pattern(
               << instr->ToShortString()
               << " not rewritten into FP8 Custom Call. Select requires a zero "
                  "operand to be exchanged with dequantization.";
-      return false;
+      return std::nullopt;
     }
   }
 
-  x_ops = {subgraph.begin() + 3, subgraph.end()};
-  return true;
+  param.commutative_ops = {subgraph.begin() + start, subgraph.end()};
+  return param;
 }
 
 // Transposes a matrix by swapping the contracting and non-contracting
@@ -535,8 +579,10 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
     }
 
     CHECK(!instr->IsRank2Transpose());
-    CHECK(!instr->mutable_operand(0)->IsRank2Transpose());
-    CHECK(!instr->mutable_operand(1)->IsRank2Transpose());
+    if (instr->operand(0)->IsRank2Transpose() ||
+        instr->operand(1)->IsRank2Transpose()) {
+      return absl::OkStatus();
+    }
     // Create a GemmBackendConfig based on the instruction.
     TF_ASSIGN_OR_RETURN(GpuBackendConfig gpu_backend_config,
                         instr->backend_config<GpuBackendConfig>());
@@ -578,35 +624,20 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
       TF_ASSIGN_OR_RETURN(
           bool supported_by_cublaslt,
           GemmIsSupportedByCublasLt(*instr, gemm_backend_config));
-      HloInstruction *a, *b, *a_scale = nullptr, *b_scale = nullptr;
-      // Sequence of ops between dequantization and GEMM which are
-      // mathematically commutative with dequantization. The second element of
-      // the pair gives the index of the operand identifying the next op in the
-      // sequence.
-      std::vector<std::pair<HloInstruction *, int>> a_ops, b_ops;
-      bool a_mult_scale{}, b_mult_scale{};
-      if (supported_by_cublaslt &&
-          Match(instr,
-                m::Dot(m::Op().WithPredicate([&](const HloInstruction *instr) {
-                  return IsSupportedF8Pattern(
-                      const_cast<HloInstruction *>(instr), a, a_scale,
-                      a_mult_scale, a_ops);
-                }),
-                       m::Op().WithPredicate([&](const HloInstruction *instr) {
-                         return IsSupportedF8Pattern(
-                             const_cast<HloInstruction *>(instr), b, b_scale,
-                             b_mult_scale, b_ops);
-                       })))) {
+      std::optional<MatchedFp8Param> a, b;
+      if (supported_by_cublaslt && instr->opcode() == HloOpcode::kDot &&
+          (a = MatchFp8Param(
+               const_cast<HloInstruction *>(instr->operand(0)))) &&
+          (b = MatchFp8Param(
+               const_cast<HloInstruction *>(instr->operand(1))))) {
         if (IsRocm(gpu_version_) && instr->shape().element_type() != F16 &&
             instr->shape().element_type() != F32) {
           TF_ASSIGN_OR_RETURN(instr,
                               TurnF8DotWithUnsupportedOutputTypeIntoF32(instr));
         }
-        TF_ASSIGN_OR_RETURN(
-            bool created_call,
-            CreateF8CustomCall(instr, gpu_backend_config, a, b, a_scale,
-                               b_scale, a_mult_scale, b_mult_scale,
-                               std::move(a_ops), std::move(b_ops)));
+        TF_ASSIGN_OR_RETURN(bool created_call,
+                            CreateF8CustomCall(instr, gpu_backend_config,
+                                               a.value(), b.value()));
         if (created_call) {
           return absl::OkStatus();
         }
@@ -722,7 +753,7 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
                                m::Broadcast(m::Op(&d_scale)).WithOneUser()))) {
       return F8ScaleD(instr, existing_gemm, d_scale);
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   absl::Status HandleAdd(HloInstruction *instr) override {
@@ -948,12 +979,10 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
     return *rocm_cc;
   }
 
-  absl::StatusOr<bool> CreateF8CustomCall(
-      HloInstruction *instr, GpuBackendConfig &gpu_backend_config,
-      HloInstruction *a, HloInstruction *b, HloInstruction *a_scale,
-      HloInstruction *b_scale, bool a_mult_scale, bool b_mult_scale,
-      std::vector<std::pair<HloInstruction *, int>> a_ops,
-      std::vector<std::pair<HloInstruction *, int>> b_ops) {
+  absl::StatusOr<bool> CreateF8CustomCall(HloInstruction *instr,
+                                          GpuBackendConfig &gpu_backend_config,
+                                          MatchedFp8Param a,
+                                          MatchedFp8Param b) {
     GemmBackendConfig &gemm_backend_config =
         *gpu_backend_config.mutable_gemm_backend_config();
     if (IsCuda(gpu_version_)) {
@@ -989,8 +1018,8 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
       }
     }
 
-    PrimitiveType a_type = a->shape().element_type();
-    PrimitiveType b_type = b->shape().element_type();
+    PrimitiveType a_type = a.fp8_input->shape().element_type();
+    PrimitiveType b_type = b.fp8_input->shape().element_type();
 
     // cuBLASLt FP8 GEMM kernels require one of the two operands to be in
     // F8E4M3FN format.
@@ -1041,8 +1070,8 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
     Literal one_literal = LiteralUtil::One(F32);
     HloInstruction *one = instr->AddInstruction(
         HloInstruction::CreateConstant(one_literal.Clone()));
-    std::array<bool, 2> mult_scale{a_mult_scale, b_mult_scale};
-    std::array<HloInstruction *, 2> scales{a_scale, b_scale}, inv_scales,
+    std::array<bool, 2> mult_scale{a.mult_scale, b.mult_scale};
+    std::array<HloInstruction *, 2> scales{a.scale, b.scale}, inv_scales,
         scales_f32;
     for (int i = 0; i < scales.size(); ++i) {
       if (scales[i]) {
@@ -1096,10 +1125,16 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
                  "dimension.";
       return false;
     }
-    if ((a_ops.empty() ? a : a_ops.back().first)->shape().dimensions_size() -
+    if ((a.commutative_ops.empty() ? a.fp8_input
+                                   : a.commutative_ops.back().first)
+                    ->shape()
+                    .dimensions_size() -
                 batch_dims.size() !=
             2 ||
-        (b_ops.empty() ? b : b_ops.back().first)->shape().dimensions_size() -
+        (b.commutative_ops.empty() ? b.fp8_input
+                                   : b.commutative_ops.back().first)
+                    ->shape()
+                    .dimensions_size() -
                 batch_dims.size() !=
             2) {
       VLOG(1) << "Failed to rewrite " << instr->ToShortString()
@@ -1110,9 +1145,7 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
 
     // Sequentially apply the collected unary, dynamic-slice, pad and select ops
     // to the unconverted and unscaled operands.
-    auto shift_ops =
-        [&instr](HloInstruction *&x,
-                 std::vector<std::pair<HloInstruction *, int>> &x_ops) -> void {
+    auto shift_ops = [&instr](HloInstruction *&x, InstrPath &x_ops) -> void {
       for (std::pair<HloInstruction *, int> op : x_ops) {
         std::vector<HloInstruction *> operands = {x};
         // Insert the additional operands of dynamic-slice ops.
@@ -1152,8 +1185,8 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
       }
       return;
     };
-    shift_ops(a, a_ops);
-    shift_ops(b, b_ops);
+    shift_ops(a.fp8_input, a.commutative_ops);
+    shift_ops(b.fp8_input, b.commutative_ops);
 
     TF_ASSIGN_OR_RETURN(bool a_is_col_major,
                         MatrixIsColumnMajor(*instr, gemm_backend_config, "a"));
@@ -1177,7 +1210,8 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
       } else {
         dim_nums->set_lhs_contracting_dimensions(0, batch_dim_offset);
       }
-      a = TransposeMatrix(a, a_contracting_dims[0], batch_dims);
+      a.fp8_input =
+          TransposeMatrix(a.fp8_input, a_contracting_dims[0], batch_dims);
     }
 
     // Similarly, cuBLASLt requires the second operand to be column-major, so
@@ -1190,15 +1224,16 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
       } else {
         dim_nums->set_rhs_contracting_dimensions(0, batch_dim_offset);
       }
-      b = TransposeMatrix(b, b_contracting_dims[0], batch_dims);
+      b.fp8_input =
+          TransposeMatrix(b.fp8_input, b_contracting_dims[0], batch_dims);
     }
 
-    a = PadOperandToMultipleOf16(batch_dims, a);
-    b = PadOperandToMultipleOf16(batch_dims, b);
+    a.fp8_input = PadOperandToMultipleOf16(batch_dims, a.fp8_input);
+    b.fp8_input = PadOperandToMultipleOf16(batch_dims, b.fp8_input);
     Shape new_output_shape = PadShapeToMultipleOf16(instr->shape(), batch_dims);
 
     std::vector<HloInstruction *> operands_list = {
-        a, b, scales_f32[0], scales_f32[1], one, one};
+        a.fp8_input, b.fp8_input, scales_f32[0], scales_f32[1], one, one};
 
     HloInstruction *new_custom_call =
         instr->AddInstruction(HloInstruction::CreateCustomCall(
@@ -1347,15 +1382,21 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
     const GemmBackendConfig &gemm_backend_config =
         gpu_backend_config.gemm_backend_config();
 
-    if (gemm_backend_config.beta() != 0.0 &&
-        existing_gemm->operand(2)->shape().element_type() != BF16 &&
-        existing_gemm->operand(2)->shape().element_type() != F16) {
-      VLOG(1) << "The scaling and conversion of the result of "
-              << existing_gemm->ToShortString()
-              << " is not fused into the FP8 Custom Call because it "
-                 "conflicts with the existing fusion of the addition of a "
-                 "matrix bias with element type other than BF16 or F16.";
-      return absl::OkStatus();
+    if (gemm_backend_config.beta() != 0.0) {
+      if (existing_gemm->operand(2)->shape().element_type() != BF16 &&
+          existing_gemm->operand(2)->shape().element_type() != F16) {
+        VLOG(1) << "The scaling and conversion of the result of "
+                << existing_gemm->ToShortString()
+                << " is not fused into the FP8 Custom Call because it "
+                   "conflicts with the existing fusion of the addition of a "
+                   "matrix bias with element type other than BF16 or F16.";
+        return absl::OkStatus();
+      } else {
+        // Turn off the output to operand aliasing, since the fp8 output and
+        // bf16/fp16 bias have different sizes.
+        xla::Cast<HloCustomCallInstruction>(existing_gemm)
+            ->set_output_to_operand_aliasing({});
+      }
     }
 
     // If necessary, invert the scaling factor of D and convert to F32.
@@ -1374,6 +1415,7 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
 
     std::unique_ptr<HloInstruction> new_gemm =
         existing_gemm->CloneWithNewShape(instr->shape());
+
     TF_RETURN_IF_ERROR(ReplaceWithNewInstruction(instr, std::move(new_gemm)));
 
     VLOG(1) << "Conversion" << (reduce_damax ? " and amax calculation" : "")

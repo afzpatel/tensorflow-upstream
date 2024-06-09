@@ -35,6 +35,7 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
+#include "absl/status/status.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -69,7 +70,6 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_layout.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/statusor.h"
 #include "xla/types.h"
 #include "xla/util.h"
@@ -708,7 +708,7 @@ absl::Status HloParserImpl::Run(HloModule* module) {
           "Syntax error when trying to parse the text as a HloModule:\n%s",
           GetError());
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
   // This means that the text is a single HLO instruction.
   if (!ParseSingleInstruction(module)) {
@@ -717,7 +717,7 @@ absl::Status HloParserImpl::Run(HloModule* module) {
         "HloInstruction:\n%s",
         GetError());
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 std::pair<HloInstruction*, HloParserImpl::LocTy>*

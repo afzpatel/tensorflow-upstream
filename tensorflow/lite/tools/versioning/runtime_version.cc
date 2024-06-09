@@ -21,8 +21,8 @@ limitations under the License.
 
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_split.h"
+#include "tensorflow/compiler/mlir/lite/schema/mutable/schema_generated.h"
 #include "tensorflow/lite/minimal_logging.h"
-#include "tensorflow/lite/schema/mutable/schema_generated.h"
 #include "tensorflow/lite/schema/schema_utils.h"
 
 namespace tflite {
@@ -422,6 +422,7 @@ std::string FindMinimumRuntimeVersionForOp(tflite::BuiltinOperator op_code,
            {{BuiltinOperator_GELU, 1}, "2.9.0"},
            {{BuiltinOperator_GELU, 2}, "2.9.0"},
            {{BuiltinOperator_DYNAMIC_UPDATE_SLICE, 1}, "2.9.0"},
+           {{BuiltinOperator_DYNAMIC_UPDATE_SLICE, 2}, "2.17.0"},
            {{BuiltinOperator_UNSORTED_SEGMENT_PROD, 1}, "2.10.0"},
            {{BuiltinOperator_UNSORTED_SEGMENT_MAX, 1}, "2.10.0"},
            {{BuiltinOperator_UNSORTED_SEGMENT_MIN, 1}, "2.11.0"},

@@ -1382,7 +1382,7 @@ tf_cc_shared_library(
         "//tensorflow/compiler/mlir/quantization/common/quantization_lib:quantization_config",
         "//tensorflow/compiler/mlir/lite/sparsity:sparsify_model",
         "//tensorflow/compiler/mlir/quantization/stablehlo/python:pywrap_quantization_lib_impl",
-        "//tensorflow/compiler/mlir/quantization/tensorflow_to_stablehlo/python:pywrap_tensorflow_to_stablehlo_lib_impl",
+        "//tensorflow/compiler/mlir/tensorflow_to_stablehlo/python:pywrap_tensorflow_to_stablehlo_lib_impl",
         "//tensorflow/compiler/mlir/quantization/tensorflow/calibrator:custom_aggregator_op",
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:quantize_model_cc_impl",
         "//tensorflow/compiler/mlir/quantization/tensorflow:passes",
@@ -1614,7 +1614,6 @@ genrule(
         "//tensorflow/c/eager:headers",
         "//tensorflow/cc:headers",
         "//tensorflow/core:headers",
-        "@local_xla//xla/stream_executor:stream_executor_install_hdrs",
     ],
     outs = ["include"],
     cmd = """

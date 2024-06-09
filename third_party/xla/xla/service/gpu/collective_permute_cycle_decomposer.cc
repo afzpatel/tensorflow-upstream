@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
@@ -38,7 +39,6 @@ limitations under the License.
 #include "xla/service/hlo_parser.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
@@ -136,7 +136,7 @@ absl::Status GetFrontendAttributes(HloCollectivePermuteInstruction* cp,
       cp->frontend_attributes().map().find(kSendRecvValidationAttr);
   if (validation_it == cp->frontend_attributes().map().end() ||
       validation_it->second == "invalid") {
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   auto statusor_bounds = ParseReplicaGroupsOnly(validation_it->second);
@@ -172,7 +172,7 @@ absl::Status GetFrontendAttributes(HloCollectivePermuteInstruction* cp,
   std::string cp2_validation_str = bounds_to_string(cp2_bounds);
   (*cp1_attr.mutable_map())[kSendRecvValidationAttr] = cp1_validation_str;
   (*cp2_attr.mutable_map())[kSendRecvValidationAttr] = cp2_validation_str;
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Decomposes a CollectivePermute instruction with a cycle in its source-target
@@ -238,7 +238,7 @@ absl::Status DecomposeCollectivePermuteCycle(
   TF_RETURN_IF_ERROR(cp->ReplaceAllUsesWith(recv_data));
   TF_RETURN_IF_ERROR(computation->RemoveInstructionAndUnusedOperands(cp));
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 }  // namespace
 

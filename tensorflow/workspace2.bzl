@@ -150,9 +150,9 @@ def _tf_repositories():
     # LINT.IfChange
     tf_http_archive(
         name = "XNNPACK",
-        sha256 = "256ab4034e93bdeea2e1216cd8361a85bd4ee4884a89bf5e4e142abcdc796805",
-        strip_prefix = "XNNPACK-50037f8072731a2cc30a961b96e199ad691887e4",
-        urls = tf_mirror_urls("https://github.com/google/XNNPACK/archive/50037f8072731a2cc30a961b96e199ad691887e4.zip"),
+        sha256 = "dac478307dd076e3fa7b9e66348df9365606b4fd52208ca1abdfbf2974ef8501",
+        strip_prefix = "XNNPACK-b66e1d7bf428c61e8d454e3f90c50b88d688c3f5",
+        urls = tf_mirror_urls("https://github.com/google/XNNPACK/archive/b66e1d7bf428c61e8d454e3f90c50b88d688c3f5.zip"),
     )
     # LINT.ThenChange(//tensorflow/lite/tools/cmake/modules/xnnpack.cmake)
 
@@ -205,9 +205,9 @@ def _tf_repositories():
     tf_http_archive(
         name = "onednn",
         build_file = "//third_party/mkl_dnn:mkldnn_v1.BUILD",
-        sha256 = "906559a25581b292352420721112e1656d21029b66e8597816f9e741fbcdeadb",
-        strip_prefix = "oneDNN-3.4.1",
-        urls = tf_mirror_urls("https://github.com/oneapi-src/oneDNN/archive/refs/tags/v3.4.1.tar.gz"),
+        sha256 = "5131ac559a13daa6e2784d20ab24e4607e55aa6da973518086326a647d389425",
+        strip_prefix = "oneDNN-3.4.2",
+        urls = tf_mirror_urls("https://github.com/oneapi-src/oneDNN/archive/refs/tags/v3.4.2.tar.gz"),
     )
 
     tf_http_archive(
